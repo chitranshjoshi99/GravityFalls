@@ -342,6 +342,7 @@ Seeding from the line ID keeps a given line stuttering identically every time it
 | Bill | 30 | `[cipher]` | `#FFD23F` | Slow. Menace is in the pacing |
 | Gideon | 44 | `[pulse freq=1.2]` on threats | `#7FBFE0` | Sweet cadence, wrong content |
 | Ford | 42 | — | `#6A2CE0` | |
+| Jeff | 52 | — | `#6B8F4E` | Doc 6 §2.1. Salesman warmth that drops to flat menace when refused |
 | Journal text | 55 | — | `#2B2118` | Ford's handwriting |
 
 ### 4.5 Typewriter

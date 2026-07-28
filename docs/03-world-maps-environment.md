@@ -210,16 +210,19 @@ extends Area2D
 func _ready() -> void:
 	body_entered.connect(_on_entered)
 
+## Superseded by Doc 00 §6.2, §7.5 — the boundary publishes a request and never
+## starts a transition itself. Validation (unlocked? Journal closed? player FREE
+## or DRIVING?) happens at RuntimeDirector priority 2.
 func _on_entered(body: Node2D) -> void:
 	if not body.is_in_group(&"player"):
 		return
 	if ZoneManager.is_seam_open(ZoneManager.current_zone, to_zone):
-		return                                # SeamLink: nothing to do, walk on
-	if not ZoneManager.is_unlocked(to_zone):
-		ZoneManager.refuse(to_zone)           # in-character "not yet" line
-		return
-	ZoneManager.gated_transition(to_zone, spawn_marker)
+		return                                # SeamLink: activation volume handles it
+	RuntimeEvents.enqueue(RuntimeEvent.Type.GATED_ZONE_REQUEST, self,
+		{&"to": to_zone, &"spawn_marker": spawn_marker})
 ```
+
+A locked destination is refused by the resolver, which emits the in-character "not yet" line — so a refusal cannot fire while the player is mid-fade, mid-cutscene, or already blacked out.
 
 ### 3.2 `ZoneManager`
 
@@ -265,6 +268,8 @@ func _stream_neighbors() -> void:
 		if not is_unlocked(nid) or not is_seam_open(current_zone, nid):
 			continue
 		var ndef: ZoneDef = _defs[nid]
+		if ndef.is_interior:
+			continue                          # Doc 00 §7.6 — interiors never stream
 		if _distance_to_rect(_player.global_position, ndef.world_rect()) > STREAM_MARGIN:
 			continue
 		_loading[nid] = ndef.scene_path
@@ -314,7 +319,10 @@ func is_seam_open(from_id: StringName, to_id: StringName) -> bool:
 	return GameState.chapter >= maxi(a.seam_chapter, b.seam_chapter) \
 		and is_unlocked(to_id)
 
-func set_current(id: StringName) -> void:
+## Renamed to activate_zone() by Doc 00 §7.2, which makes this the single commit
+## path for current zone, palette floor, and BGM — exteriors and interiors alike.
+## Called only by RuntimeDirector, never by a ZoneActivationVolume directly.
+func activate_zone(id: StringName) -> void:
 	if id == current_zone:
 		return
 	current_zone = id
@@ -481,13 +489,15 @@ func _ready() -> void:
 	if GameState.is_secret_found(secret_id):
 		_reveal_now()
 
+## Called by RuntimeDirector at priority 14, only while triggers are armed
+## (Doc 00 §6.3). The Area2D callback publishes SECRET_REVEAL_REQUEST and stops.
 func try_reveal(method: Reveal) -> bool:
 	if method != reveal or GameState.is_secret_found(secret_id):
 		return false
 	GameState.mark_secret_found(secret_id)
 	_reveal_now()
 	Journal.unlock_entry(journal_entry)
-	SfxBus.play(&"secret_found")
+	AudioDirector.play_sfx(&"secret_found")
 	Weirdness.pulse(0.35, 0.2)
 	return true
 
@@ -568,7 +578,13 @@ Off-road speed being *below* walking is deliberate — it keeps the cart a road 
 
 ## 8. Interiors
 
-Interiors are separate scenes, entered through `DoorTransition` (a `GateTransition` variant with a 0.25 s wipe and no zone-manager involvement). They are never streamed: they're small, they're bounded, and the wipe is diegetic — you walked through a door.
+Interiors are separate scenes, entered through `DoorBoundary` (a `GateTransition` variant with a 0.25 s wipe). They are never streamed: they're small, they're bounded, and the wipe is diegetic — you walked through a door.
+
+> **Superseded by Doc 00 §7.6.** An earlier draft said "no zone-manager involvement." Interiors
+> still swap palette *and* BGM (`bgm_attic`, `bgm_lab`), so they register as `ZoneDef`s with
+> `is_interior = true` and commit through the same `activate_zone()` path — excluded from
+> `_stream_neighbors()` and `_cull_distant()`, always gated, off-grid at `grid_offset =
+> Vector2i(-1, -1)`. Everything below stands; only the commit path is shared.
 
 | Rule | Value |
 |---|---|
@@ -612,6 +628,8 @@ Every exterior zone scene must have, in order:
 7. `PaletteRegion` with the zone's `.tres`.
 8. `SecretTrigger`s at the §6 coordinates.
 9. `OverheadFade` on every canopy covering walkable ground.
+10. A `ZoneActivationVolume` 96 px inside every seamless inbound edge — **one per inbound direction, not one per boundary**. Doc 00 §7.1. This is the only node permitted to request `activate_zone()`.
+11. A `SeamBlocker` on every seam-capable boundary, disabled by default. Doc 00 §7.1; it owns §3.3's soft block and publishes the grace-wipe fallback.
 
 ---
 

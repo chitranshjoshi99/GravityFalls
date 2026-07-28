@@ -152,7 +152,7 @@ func _should_show() -> bool:
 		or CombatDirector.threat_active                        # enemy aware of player
 		or Journal.state != Journal.JournalState.CLOSED
 		or GameState.recently_changed_item(2.0)
-		or BossDirector.active
+		or CombatDirector.boss_active                          # Doc 00 §2.3
 	)
 
 func _set_shown(v: bool) -> void:
@@ -189,8 +189,12 @@ enum Mode { AUTO, BUBBLE, BOX }
 @export var portrait_expression: StringName = &"neutral"
 @export var anxious: bool = false             ## enables Dipper's stutter transform
 @export var sfx_override: StringName = &""
-@export var pause_player: bool = false        ## sets PlayerController CUTSCENE state
 ```
+
+> **Superseded — Doc 00 §8.3.** An earlier draft carried `pause_player: bool`, which set
+> `PlayerController` to `CUTSCENE` directly. Only `RuntimeDirector` commits player state
+> (Doc 00 §14.1), so the field is removed. A line needing player lockout is authored as a
+> `CUTSCENE_REQUEST` through Doc 00 §8.2.
 
 ### 3.2 Mode selection
 
@@ -208,10 +212,11 @@ static func resolve_mode(line: DialogueLine) -> Mode:
 		return Mode.BUBBLE          # never block the frame mid-fight
 	if line.text.length() > 90:
 		return Mode.BOX             # too long for a bubble
-	if line.pause_player:
-		return Mode.BOX
 	return Mode.BUBBLE
 ```
+
+A line that needs the player held still is not a `Mode` decision at all — it is a cutscene, and
+`CutsceneDirector` renders its lines as `BOX` for the duration it owns player state.
 
 ### 3.3 Speech bubbles
 

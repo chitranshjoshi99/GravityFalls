@@ -215,6 +215,8 @@ const ACCEL_GROUND := 1800.0
 const FRICTION_GROUND := 2400.0
 const ACCEL_AIRBORNE := 620.0
 
+## Superseded by Doc 00 §5.1, which adds ATTACKING, DRIVING, ZONE_TRANSITION,
+## and BLACKOUT. The six states below keep their exact meaning.
 enum State { FREE, JOURNAL, DODGING, HURT, FUMBLING, CUTSCENE }
 
 @export var walk_speed := 210.0
@@ -350,24 +352,40 @@ Taking damage with the Journal open drops the book. Dipper scrambles for it for 
 
 This single rule is what makes the live world a real threat rather than a cosmetic choice. 0.80 s is long enough to eat a second hit from most enemies, short enough that it doesn't chain into a death spiral.
 
+The three constants below are canonical. **The call path is superseded by Doc 00 §2.4 and
+§5.2:** `on_owner_damaged()` is invoked by `RuntimeDirector` during damage resolution, not from
+a hitbox callback, and the fumble is counted in physics ticks rather than by a `SceneTree`
+timer — a timer mutates state outside the resolver, does not survive pause predictably, and
+cannot be stepped by Doc 00 §12's headless harness.
+
 ```gdscript
 # res://journal/journal.gd  (excerpt)
 const FUMBLE_DURATION := 0.80
 const OPEN_TIME := 0.42
 const CLOSE_TIME := 0.30
 
+const FUMBLE_TICKS := int(round(FUMBLE_DURATION / (1.0 / 60.0)))   # 48
+
+var _fumble_ticks_left := 0
+
+## Called by RuntimeDirector at damage commit. Never from a signal callback.
 func on_owner_damaged() -> void:
 	if state == JournalState.CLOSED:
 		return
 	_cancel_scan()
 	state = JournalState.FUMBLED
 	fumbled.emit()
-	SfxBus.play(&"journal_drop")
-	get_tree().create_timer(FUMBLE_DURATION).timeout.connect(
-		func() -> void:
-			state = JournalState.CLOSED
-			recovered.emit()
-	)
+	AudioDirector.play_sfx(&"journal_drop")
+	_fumble_ticks_left = FUMBLE_TICKS
+
+## Called by RuntimeDirector once per resolved tick (Doc 00 §4.1 step 5b).
+func tick() -> void:
+	if _fumble_ticks_left <= 0:
+		return
+	_fumble_ticks_left -= 1
+	if _fumble_ticks_left == 0:
+		state = JournalState.CLOSED
+		recovered.emit()
 ```
 
 ### 5.3 Layout & world visibility
@@ -786,8 +804,14 @@ var current: int = 6
 const IFRAME_DURATION := 0.90
 const KNOCKBACK_SPEED := 340.0
 
-var _invulnerable := false
+const IFRAME_TICKS := int(round(IFRAME_DURATION / (1.0 / 60.0)))   # 54
 
+var _invulnerable := false
+var _iframe_ticks_left := 0
+
+## Superseded call path — Doc 00 §2.4, §0.2. take_damage() is called only by
+## RuntimeDirector at priority 3/4; an enemy hitbox publishes a DAMAGE event and
+## never calls this. The i-frame window is counted in ticks by tick(), below.
 func take_damage(amount: int, from: Node2D = null) -> bool:
 	if _invulnerable or current <= 0:
 		return false
@@ -804,9 +828,16 @@ func take_damage(amount: int, from: Node2D = null) -> bool:
 	if current == 0:
 		depleted.emit()
 
-	get_tree().create_timer(IFRAME_DURATION).timeout.connect(
-		func() -> void: _invulnerable = false)
+	_iframe_ticks_left = IFRAME_TICKS
 	return true
+
+## Called by RuntimeDirector once per resolved tick (Doc 00 §4.1 step 5b).
+func tick() -> void:
+	if _iframe_ticks_left <= 0:
+		return
+	_iframe_ticks_left -= 1
+	if _iframe_ticks_left == 0:
+		_invulnerable = false
 ```
 
 Base 6 pips, +2 per upgrade to a cap of 14. Most enemies deal 1; bosses deal 2–3.
@@ -848,10 +879,17 @@ extends Area2D
 @export var zone_id: StringName
 @export var wake_line_id: StringName     ## dialogue played on respawn here
 
+## Superseded by Doc 00 §6.2 — publish only. A checkpoint must never commit while
+## a gated transition is fading, and RuntimeDirector's arming check owns that.
 func _on_body_entered(body: Node2D) -> void:
 	if body.is_in_group(&"player"):
-		GameState.set_checkpoint(checkpoint_id, zone_id, global_position, wake_line_id)
+		RuntimeEvents.enqueue(RuntimeEvent.Type.CHECKPOINT_REACHED, self, {
+			&"id": checkpoint_id, &"zone_id": zone_id,
+			&"position": global_position, &"wake_line_id": wake_line_id,
+		})
 ```
+
+Committing a checkpoint also triggers an autosave (Doc 00 §9.1), which is why the commit has to be resolver-owned rather than fired from an overlap.
 
 Checkpoint placement rule for Doc 3: every zone entrance, every boss arena door, and any point where backtracking would exceed ~90 s.
 
@@ -894,13 +932,18 @@ func _physics_process(_delta: float) -> void:
 		current = best
 		target_changed.emit(current)
 
+## Superseded by Doc 00 §6.1 — `E` publishes an intent; it never calls interact()
+## directly, because a same-tick hit must be able to cancel it.
 func _unhandled_input(e: InputEvent) -> void:
-	if e.is_action_pressed("interact") and current and owner.state == PlayerController.State.FREE:
-		current.interact(owner)
+	if e.is_action_pressed(&"interact") and current:
+		RuntimeEvents.enqueue(RuntimeEvent.Type.INTERACT_REQUEST, self,
+			{&"target": current})
 		get_viewport().set_input_as_handled()
 ```
 
 Weighting by facing as well as distance stops the maddening case of two adjacent objects where the "wrong" one is 3 px closer.
+
+Target selection above is unchanged and still runs every physics tick. `RuntimeDirector` re-verifies range, facing, and `can_interact()` at commit time (Doc 00 §6.1), because the target may have moved or despawned since the intent was published.
 
 ---
 

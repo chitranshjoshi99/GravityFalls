@@ -43,7 +43,7 @@ Docs 1–5 contain illustrative snippets that mutate state directly from Godot c
 | Doc 3 §3.1 `ZoneBoundary._on_entered()` direct `gated_transition()` | §7.5 | Direct call → `GATED_ZONE_REQUEST` |
 | Doc 3 §3.2 `ZoneManager.set_current()` | §7.2 `activate_zone()` | Renamed; single commit path |
 | Doc 3 §8 `DoorTransition`, "no zone-manager involvement" | §7.6 | Interiors are `ZoneDef`s with streaming disabled |
-| Doc 4 §3.1 `DialogueLine.pause_player` | §8.3 | Field removed; author a `CUTSCENE_REQUEST` |
+| Doc 4 §3.1 `DialogueLine.pause_player` | §8.4 | Field removed; author a `CUTSCENE_REQUEST` |
 | Docs 2 §5.2 / 3 §6 `SfxBus.play()` | §2.3 | Name corrected to `AudioDirector.play_sfx()` |
 | Doc 4 §2.7 `BossDirector.active` | §2.3 | Folded into `CombatDirector.boss_active` |
 
@@ -178,11 +178,13 @@ enum Type {
 	ITEM_USE_REQUEST,
 	ITEM_SELECT_REQUEST,       # radial commit, Doc 4 §6.3
 	JOURNAL_TOGGLE_REQUEST,
+	JOURNAL_SUBMIT_REQUEST,    # player text: a weakness or a cipher answer (§8.3)
 	UV_TOGGLE_REQUEST,
 	INTERACT_REQUEST,
 
 	# --- passive progression -----------------------------------------------
 	CHECKPOINT_REACHED,
+	ENCOUNTER_STATE_REQUEST,   # arm/clear a checkpoint's encounter block (§11.3)
 	SECRET_REVEAL_REQUEST,
 	ANOMALY_ENTERED,
 	ANOMALY_EXITED,
@@ -388,7 +390,7 @@ func _resolve() -> void:
 	if _try_attack():         return    # 9
 	if _try_item_use():       return    # 10
 	if _try_journal():        return    # 11
-	if _try_journal_domain(): return    # 12  — UV toggle, radial commit
+	if _try_journal_domain(): return    # 12  — UV toggle, radial commit, text submit
 	_try_interact()                     # 13
 	_try_passive()                      # 14
 	_try_chapter_advance()              # 15  — always last
@@ -428,9 +430,9 @@ Each `_try_*` returns `true` only if it committed. A committed higher priority e
 | 9 | `ATTACK_REQUEST` | Requires `FREE`. Enters `ATTACKING` for Doc 2 §4's windup+active+recovery. |
 | 10 | `ITEM_USE_REQUEST` | Requires `FREE`, `JOURNAL`, or `DRIVING` (horn, thrown item). |
 | 11 | `JOURNAL_TOGGLE_REQUEST` | Opens/closes only in a permitted player state (§5.2). |
-| 12 | `UV_TOGGLE_REQUEST` · `ITEM_SELECT_REQUEST` | Journal-domain intents. Require `JOURNAL` (UV) or `FREE`/`JOURNAL` (radial). |
+| 12 | `UV_TOGGLE_REQUEST` · `ITEM_SELECT_REQUEST` · `JOURNAL_SUBMIT_REQUEST` | Journal-domain intents. Require `JOURNAL` (UV, submit) or `FREE`/`JOURNAL` (radial). §8.3. |
 | 13 | `INTERACT_REQUEST` | Calls an interactable only while Player state is `FREE` and no higher-priority event won. |
-| 14 | `CHECKPOINT_REACHED` · `SECRET_REVEAL_REQUEST` · `ANOMALY_ENTERED/EXITED` | Commit only when trigger processing is armed (§6.3). |
+| 14 | `CHECKPOINT_REACHED` · `ENCOUNTER_STATE_REQUEST` · `SECRET_REVEAL_REQUEST` · `ANOMALY_ENTERED/EXITED` | Commit only when trigger processing is armed (§6.3). |
 | 15 | `CHAPTER_ADVANCE_REQUEST` | Always last, so a chapter advance never lands mid-resolution and never changes a gate another `_try_*` already read this tick. |
 
 **Scan is not an event.** Doc 2 §5.4 polls `Input.is_action_pressed("scan")` continuously and requires `PlayerController.State.JOURNAL`. That poll stays — it is a *continuous* intent, not a discrete one, and the resolver governs it by owning the `JOURNAL` state it depends on. Damage, dodge, cutscene, and zone travel all cancel an in-progress scan through §5.2's cancellation rule.
@@ -614,6 +616,8 @@ At priority 13, `RuntimeDirector` verifies `PlayerController.State.FREE`, target
 | Node | Callback queues | Direct mutation it must not perform |
 |---|---|---|
 | `Checkpoint` | `CHECKPOINT_REACHED` | `GameState.set_checkpoint()` |
+| Boss phase controller | `ENCOUNTER_STATE_REQUEST` | `GameState.checkpoint.encounter` |
+| Journal text fields | `JOURNAL_SUBMIT_REQUEST` | `journal_overrides`, `ciphers_solved` |
 | `SecretTrigger` | `SECRET_REVEAL_REQUEST` | unlock entry, SFX, weirdness pulse |
 | `AnomalyField` | enter/exit facts | zone progression or Player state |
 | `ZoneBoundary` | gated-travel request | scene loading or Player state |
@@ -705,6 +709,7 @@ Prerequisite: the destination has been asynchronously loaded by Doc 3 §3.2's `_
 4. TransitionDirector fades to opaque over 0.35 s. Old-zone BGM continues.
 5. ZoneManager frees the old-zone scene, loads/instantiates the destination,
    and places Dipper (and any vehicle) at spawn_marker.
+5a. RuntimeDirector applies the request's TransitionTeardown, if any (§7.4.1).
 6. ZoneManager.activate_zone(destination) — palette, current zone, BGM crossfade.
 7. TransitionDirector fades in over 0.35 s while the BGM crossfade continues.
 8. Transition lock released. Player returns to FREE; destination triggers arm.
@@ -712,6 +717,39 @@ Prerequisite: the destination has been asynchronously loaded by Doc 3 §3.2's `_
 ```
 
 Starting the music at step 6 is intentional: the new scene is real, Dipper is physically there, and the visual fade-in lets the new ambience arrive with the place rather than with a loading screen.
+
+### 7.4.1 `TransitionTeardown`
+
+Some transitions are not just a change of place. A chapter transitioning out of a set-piece needs the boss cleared, the vehicle dismissed, health restored, and the checkpoint moved — and every one of those is gameplay state, which §14.1 says only `RuntimeDirector` may commit.
+
+A chapter therefore **declares** the teardown as data on the request. It does not perform it.
+
+```gdscript
+# res://runtime/transition_teardown.gd
+class_name TransitionTeardown
+extends Resource
+
+@export var clear_combat: bool = false       ## boss_active/id/phase → 0, aggro cleared
+@export var exit_vehicle: bool = false       ## DRIVING → FREE, vehicle despawned
+@export var restore_health: bool = false     ## Health → max_pips
+@export var release_weirdness: bool = false  ## event level → 0; zone floor takes over
+@export var clear_pending_blackout: bool = false
+@export var set_checkpoint: Dictionary = {}  ## same shape as GameState.checkpoint
+```
+
+```gdscript
+RuntimeEvents.enqueue(RuntimeEvent.Type.GATED_ZONE_REQUEST, self, {
+	&"to": &"z_shack_ext",
+	&"spawn_marker": &"sp_ch01_arrival",
+	&"teardown": preload("res://chapters/ch01/rewind_teardown.tres"),
+})
+```
+
+Applied at step 5a — inside the lock, while the overlay is opaque, after the destination is mounted and before `activate_zone()` commits. That ordering is deliberate: the teardown runs while nothing is visible and no trigger is armed, so a half-torn-down world is never on screen for a frame.
+
+**It is a fixed set of flags, not a callback.** A `Callable` here would be a hole straight back through §14.1 — a chapter could do anything under the guise of a teardown, at the one moment nothing can observe it. Every field is a boolean or plain data, `RuntimeDirector` performs each commit itself, and §12 check 21 asserts the set is exhaustive. A chapter that needs something not on this list amends this document.
+
+Teardown is optional. Most transitions declare none.
 
 `SEAM_FALLBACK_REQUEST` (Doc 3 §3.3's grace wipe) runs this same sequence with a 0.12 s wipe instead of a 0.35 s fade. It is the only transition a player can trigger by out-running the loader, and it is logged at `push_warning` level so playtesting reveals whether `STREAM_MARGIN` needs retuning.
 
@@ -778,12 +816,48 @@ CutsceneDirector.request(&"ch03_gideon_intro", {
 	&"lines": [ ... DialogueLine ... ],
 	&"camera": &"path/to/CameraRig",
 	&"on_complete_flag": &"ch03_met_gideon",
+	&"on_complete_intent": RuntimeEvent.Type.JOURNAL_TOGGLE_REQUEST,   # optional
 })
 ```
 
 A cutscene never sets `GameState` fields directly. It declares `on_complete_flag`, and `RuntimeDirector` writes it on completion — so a cutscene interrupted by a blackout does not leave a half-set world.
 
-### 8.3 `pause_player` is removed
+### 8.2.1 Scripted follow-up intents
+
+§8.1 step 6 is absolute: a cutscene always returns the player to `FREE` with the Journal `CLOSED`. A chapter that wants the player to *end up* in some other state — reading the Journal, holding an item — does not get to set it, because that is the class of direct mutation this document exists to prevent.
+
+`on_complete_intent` is the supported path. On completion, `RuntimeDirector` writes `on_complete_flag`, returns the player to `FREE`, and then **enqueues the named intent, which resolves on the next tick through its normal priority row.**
+
+That indirection is the whole point:
+
+- The Journal opens via `JOURNAL_TOGGLE_REQUEST` at priority 11, so it plays the real 0.42 s `OPENING` animation and passes through the real state machine. There is no second, scripted way to open the book.
+- Because it is an intent and not a state assignment, it can lose. If the player takes a hit on the tick after the cutscene ends, damage at priority 4 cancels it and the Journal stays closed — which is correct, and which a direct `state = OPEN` would have gotten wrong.
+
+Only intents the player could have expressed themselves are legal here. `on_complete_intent` may name `JOURNAL_TOGGLE_REQUEST`, `ITEM_SELECT_REQUEST`, or `UV_TOGGLE_REQUEST`, and nothing else. It may never name a zone request, a damage event, or a cutscene.
+
+### 8.3 Player text submission
+
+Two places let the player type into the world: the weakness field on an incomplete entry (§9.2.1) and the Ciphers tab's decode pane (Doc 4 §6.4). Both write `GameState` — `journal_overrides` and `ciphers_solved` — so both go through the resolver like any other intent.
+
+The UI collects text and enqueues. It validates nothing and commits nothing:
+
+```gdscript
+# res://ui/journal/weakness_field.gd  (and cipher_pane.gd)
+func _on_submit_pressed() -> void:
+	RuntimeEvents.enqueue(RuntimeEvent.Type.JOURNAL_SUBMIT_REQUEST, self, {
+		&"kind": &"weakness",          # or &"cipher"
+		&"target": &"entry_gnomes",    # entry id, or cipher fragment id
+		&"text": _line_edit.text,
+	})
+```
+
+At priority 12 `RuntimeDirector` verifies Player state is `JOURNAL`, dispatches on `kind` to `JournalDB.submit_weakness()` or `Cipher`/`CipherLock`, marks the save dirty, and emits `journal_submit_committed(kind, target, accepted)`. The pane reacts to that signal — it never reads its own return value, because the submission may not have happened.
+
+**It can lose, and that is correct.** A hit landing on the same tick resolves at priority 4 and cancels the submission along with every other Journal-domain intent; the typed text stays in the field and the player can press submit again after the fumble. A UI that committed directly would have written to the save mid-fumble.
+
+One event covers both cases because they are the same shape — player text, a target id, an accept/reject answer — and a second event type would mean a second path to audit. `kind` is a closed set; an unrecognized value is rejected with `push_error` at commit.
+
+### 8.4 `pause_player` is removed
 
 Doc 4 §3.1's `DialogueLine.pause_player` set `PlayerController` to `CUTSCENE` directly, which §14.1 forbids. The field is deleted. Any line needing player lockout is authored as a `CUTSCENE_REQUEST` through §8.2.
 
@@ -819,17 +893,68 @@ const SAVE_VERSION := 1
 var chapter: int = 1
 var flags: Dictionary = {}              # StringName -> bool | int | float | String
 var inventory: Dictionary = {}          # StringName -> int
-var journal_entries: Array[StringName] = []
+var journal_entries: Array[StringName] = []   ## which entries are unlocked
+var journal_overrides: Dictionary = {}        ## StringName -> Dictionary; §9.2.1
 var secrets_found: Array[StringName] = []
 var sigils_found: Array[StringName] = []      # Doc 3 §6.2, ten of them
 var ciphers_solved: Array[StringName] = []
 var checkpoint := {
 	&"id": &"", &"zone_id": &"", &"position": Vector2.ZERO, &"wake_line_id": &"",
+	&"encounter": {},                     ## §11.3; empty for ordinary checkpoints
 }
 var playtime: float = 0.0
 ```
 
 `Settings` (Doc 4 §5.1, §7.3) is **not** in the save. It lives in `user://settings.cfg` and survives New Game — accessibility settings are a property of the person, not the playthrough.
+
+### 9.2.1 `journal_overrides` — the Journal is writable
+
+`JournalEntry` resources are **authored, immutable, shared assets**. Writing to one at runtime is a bug with two heads: the change is lost on reload because `.tres` files are not saved, and — worse — the mutated resource persists in memory across New Game, so a fresh playthrough starts with the previous player's handwriting in it.
+
+Every mutable per-entry fact therefore lives in the save, keyed by entry id:
+
+```gdscript
+journal_overrides = {
+	&"entry_gnomes": {
+		&"weakness_written": "leaf blowers",   ## verbatim, whatever the player typed
+		&"weakness_verified": true,
+	},
+}
+```
+
+Rules:
+
+1. An entry with no override behaves exactly as authored. Absence is the default, so the dictionary stays small and most entries never appear in it.
+2. **Missing keys read as defaults**, per §9.2's migration rule — so a later chapter adding a per-entry field (a player sketch, a margin note, a sighting count) needs no `SAVE_VERSION` bump.
+3. Reads go through `JournalDB`, never through the resource directly:
+
+```gdscript
+# res://journal/journal_db.gd
+static func weakness_written(id: StringName) -> String:
+	return GameState.journal_overrides.get(id, {}).get(&"weakness_written", "")
+
+static func is_verified(id: StringName) -> bool:
+	var e := entry(id)
+	if not e.weakness.is_empty():
+		return true                        # Ford's own entries are trusted
+	return GameState.journal_overrides.get(id, {}).get(&"weakness_verified", false)
+
+static func damage_multiplier(id: StringName) -> float:
+	return 1.45 if is_verified(id) else 1.0
+
+## The only writer. Called by RuntimeDirector at priority 12 (§8.3), never by UI.
+static func submit_weakness(id: StringName, text: String) -> bool:
+	var ok := entry(id).verifies(text)
+	var o: Dictionary = GameState.journal_overrides.get_or_add(id, {})
+	o[&"weakness_written"] = text
+	o[&"weakness_verified"] = ok
+	GameState.mark_dirty()                 # §9.1 deferred autosave
+	return ok
+```
+
+`JournalEntry` keeps `accepted_answers` and the pure `verifies()` / `_normalize()` comparison, because those are authored data and a pure function. It holds no player state at all.
+
+§12 check 26 round-trips an override through a save, and check 27 asserts that a New Game leaves no override behind.
 
 **Flag namespace.** Twenty chapter docs writing into one dictionary needs a rule, or Chapter 14 silently overwrites Chapter 3.
 
@@ -927,8 +1052,11 @@ At zero pips, Doc 2 §7.3's presentation runs as written: desaturate over 0.6 s,
    Else:
       place the player at checkpoint.position.
 4. Health restored to full (Doc 2 §7.3). Stamina full. external_force cleared.
-5. Enemies in the current room respawn; CombatDirector.reset() clears aggro
-   so the player does not wake into an active threat state.
+5. If checkpoint.encounter is empty:
+      enemies in the current room respawn; CombatDirector.reset() clears aggro,
+      so the player does not wake into an active threat state.
+   Else:
+      §11.3's encounter restore runs instead of the reset.
 6. Weirdness returns to the zone floor via activate_zone(), or set_zone_floor()
    if the zone did not change.
 7. AudioDirector releases the blackout duck over 1.0 s (Doc 5 §8).
@@ -938,6 +1066,62 @@ At zero pips, Doc 2 §7.3's presentation runs as written: desaturate over 0.6 s,
 ```
 
 Step 3 is why respawn sits at priority 1 rather than being a special case: a cross-zone respawn genuinely *is* zone travel, and reusing §7.4 means it is covered by the same tests.
+
+### 11.3 Encounter respawn
+
+Step 5's blanket `CombatDirector.reset()` is right for ordinary death — you wake up safe — and wrong for dying inside a boss fight, where it would drop the player back at a checkpoint with the boss gone and the fight unwinnable.
+
+`GameState.checkpoint` therefore carries an optional `encounter` block:
+
+```gdscript
+checkpoint = {
+	&"id": &"cp_ch01_clearing",
+	&"zone_id": &"z_woods_south",
+	&"position": Vector2(...),
+	&"wake_line_id": &"",
+	&"encounter": {                      ## optional; empty for ordinary checkpoints
+		&"boss_id": &"boss_gnome",
+		&"phase": 2,                     ## the phase to resume at, not restart from
+		&"setup": &"ch01_gnomonster_ph2", ## named scene-state the chapter authors
+	},
+}
+```
+
+When present, step 5 restores rather than resets:
+
+```text
+a. CombatDirector.boss_active = true, boss_id and boss_phase from the block.
+b. The named setup is instantiated — for a chapter, this is the boss rig, any
+   vehicle, and any escort NPC, placed at their phase-start positions.
+c. Ordinary enemies in the room respawn as normal. Aggro is cleared; the boss
+   is not aggro, it is state.
+d. AudioDirector resumes the boss piece at the phase's stem configuration,
+   cutting on the next bar (Doc 5 §4.4).
+```
+
+**A checkpoint's `encounter` block is written when the checkpoint is taken, not when it is used.** A chapter arms it on entering a boss phase and clears it on the boss's defeat, so a player who returns to that checkpoint later — after winning — respawns into an empty clearing, not a resurrected fight.
+
+`checkpoint.encounter` is `GameState`, so §14.1 applies: a chapter **requests** the change and never writes it.
+
+```gdscript
+# arm — on entering a boss phase
+RuntimeEvents.enqueue(RuntimeEvent.Type.ENCOUNTER_STATE_REQUEST, self, {
+	&"boss_id": &"boss_gnome",
+	&"phase": 2,
+	&"setup": &"ch01_gnomonster_ph2",
+})
+
+# clear — on the boss's defeat
+RuntimeEvents.enqueue(RuntimeEvent.Type.ENCOUNTER_STATE_REQUEST, self, {})
+```
+
+Resolved at priority 14 with the other progression events. An empty payload clears; a populated one arms, and is rejected with `push_error` if `setup` names a phase setup that was never registered with `CombatDirector` — a typo there would otherwise produce a checkpoint that respawns into an empty boss arena, which is the worst failure this whole mechanism exists to prevent.
+
+Committing at 14 means the arm lands after any same-tick damage or zone travel. A player who dies on the exact tick a phase begins therefore respawns at the *previous* phase's encounter, not a half-armed new one.
+
+`setup` is a `StringName`, not a scene path or a callable. The chapter registers named phase setups with `CombatDirector`; the resolver looks one up and instantiates it. Same reasoning as §7.4.1: a callable at this point in the sequence would be an unaudited mutation hook running while the screen is black.
+
+Chapters that have no boss never touch any of this. `encounter` defaults to `{}` and step 5 behaves exactly as it did.
 
 ---
 
@@ -998,6 +1182,16 @@ Automated Godot headless tests must prove:
 18. A `CHECKPOINT_REACHED` published on the same tick as a seamless activation commits — that tick or the next — and is never silently lost (§4.6).
 19. `RESPAWN_REQUEST` is consumed by `_resolve_locked()` during `BLACKOUT`; a blackout with a queued respawn always reaches `FREE` within its expected tick count and never deadlocks.
 20. Gated transition, door wipe, boot, and respawn all release control on `_lock_ticks == 0`, with the fade tween stubbed out entirely — proving no gameplay state depends on an animation completing (§4.5).
+21. **`TransitionTeardown` exposes no `Callable` field**, and every declared flag maps to a commit `RuntimeDirector` performs itself (§7.4.1). A reflection test over the resource's properties, so adding a callback field fails the build.
+22. A teardown applies at step 5a — after the destination mounts, before `activate_zone()` — and never while any trigger is armed or the overlay is transparent.
+23. A cutscene's `on_complete_intent` resolves through its normal priority row on the following tick, and is **cancelled by same-tick damage** rather than forced (§8.2.1). Only the three permitted intent types are accepted; any other is rejected at request time.
+24. A checkpoint with an empty `encounter` resets combat on respawn; one with an `encounter` restores `boss_active`, `boss_id`, and `boss_phase` and instantiates the named setup (§11.3).
+25. Defeating a boss clears the `encounter` block from any checkpoint that carries it, so returning to that checkpoint later does not resurrect the fight.
+26. A `journal_overrides` entry — written text and verified flag — survives a save round-trip, and an entry with no override reads its authored values (§9.2.1).
+27. `new_game()` leaves `journal_overrides` empty even after a prior session wrote to it, proving no player state leaked onto a shared `JournalEntry` resource.
+28. `ENCOUNTER_STATE_REQUEST` commits only through the resolver at priority 14; an arm naming an unregistered `setup` is rejected rather than written.
+29. A `JOURNAL_SUBMIT_REQUEST` in the same tick as damage does **not** write to the save; the text survives in the field and a resubmit after the fumble commits normally (§8.3).
+30. No UI script calls `JournalDB.submit_weakness()` or a cipher validator directly — a static scan over `res://ui/`, so a future pane cannot quietly bypass the resolver.
 
 Checks 1–3, 6, and 14 need a real scene tree; run them from a small `test_runtime.tscn` driven by `Engine.get_physics_frames()`. The rest run from the pure harness above.
 
@@ -1010,7 +1204,7 @@ Every chapter doc is authored against this surface and nothing below it.
 | Need | Use | Never |
 |---|---|---|
 | Story beat fires | `CUTSCENE_REQUEST` via §8.2 | Call dialogue from a zone `Area2D` |
-| Player lockout for a line | A cutscene (§8.3) | `DialogueLine.pause_player` — removed |
+| Player lockout for a line | A cutscene (§8.4) | `DialogueLine.pause_player` — removed |
 | Chapter ends | `CHAPTER_ADVANCE_REQUEST`, `to = from + 1` | Write `GameState.chapter` |
 | Persist a beat | `on_complete_flag`, `ch<NN>_` prefix (§9.2) | Write another chapter's flags |
 | Boss phase change | `CombatDirector.boss_phase` (§2.3) | Touch Doc 5's stem gains |
@@ -1019,6 +1213,10 @@ Every chapter doc is authored against this surface and nothing below it.
 | Cipher | Doc 2 §5.6 `Cipher` + Doc 3 §6.1 schedule | A per-chapter cipher implementation |
 | Hard gate | Always author a non-cipher path (Doc 2 §12.9) | A cipher-only wall |
 | Respawn point | `Checkpoint` node, Doc 3 §9 placement rule | Custom respawn handling |
+| State reset across a transition | A `TransitionTeardown` on the request (§7.4.1) | Mutate combat/player/health directly |
+| Player ends a cutscene reading | `on_complete_intent` (§8.2.1) | Set Journal state after a cutscene |
+| Dying mid-boss resumes the fight | `ENCOUNTER_STATE_REQUEST` (§11.3) | Write `checkpoint.encounter` directly |
+| Player writes in the Journal | `JOURNAL_SUBMIT_REQUEST` (§8.3) | Call `JournalDB.submit_weakness()` from UI, or mutate a `JournalEntry` |
 
 ---
 
@@ -1046,3 +1244,9 @@ Every chapter doc is authored against this surface and nothing below it.
 20. **Seamless travel takes no transition lock and does not end the tick.** Only gated travel, the seam fallback, and a cross-zone respawn lock the frame.
 21. A transition's duration is a physics-tick countdown. Tweens mirror it; no tween, fade, or animation ever gates a gameplay state change.
 22. `RESPAWN_REQUEST` is the only event that passes the priority-0 gate, consumed by `_resolve_locked()`.
+23. A cutscene always ends `FREE` with the Journal `CLOSED`. A chapter wanting another end state declares `on_complete_intent`, which resolves as an ordinary intent and may lose to damage.
+24. Transition-time state changes are declared as a `TransitionTeardown` resource and committed by `RuntimeDirector`. Chapters never mutate combat, player, health, Weirdness, or checkpoint state during a transition.
+25. Neither `TransitionTeardown` nor an `encounter` block may carry a `Callable`. Both are plain data, and the resolver performs every commit.
+26. A checkpoint taken inside a boss fight carries an `encounter` block and resumes the fight at its phase. Ordinary checkpoints reset combat as before. Chapters arm and clear it with `ENCOUNTER_STATE_REQUEST`; they never write `checkpoint.encounter`.
+27. `JournalEntry` resources are immutable authored data. Every mutable per-entry fact lives in `GameState.journal_overrides` and is read through `JournalDB`.
+28. Player-typed text — weakness fields and cipher answers alike — is submitted as `JOURNAL_SUBMIT_REQUEST` and committed by the resolver at priority 12. UI panes collect text and react to `journal_submit_committed`; they never validate or write.

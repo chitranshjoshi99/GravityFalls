@@ -191,7 +191,7 @@ enum Mode { AUTO, BUBBLE, BOX }
 @export var sfx_override: StringName = &""
 ```
 
-> **Superseded — Doc 00 §8.3.** An earlier draft carried `pause_player: bool`, which set
+> **Superseded — Doc 00 §8.4.** An earlier draft carried `pause_player: bool`, which set
 > `PlayerController` to `CUTSCENE` directly. Only `RuntimeDirector` commits player state
 > (Doc 00 §14.1), so the field is removed. A line needing player lockout is authored as a
 > `CUTSCENE_REQUEST` through Doc 00 §8.2.
@@ -441,6 +441,8 @@ The preview updating live as you scrub the Caesar shift is deliberate — it tur
 
 Solved fragments burn gold at the edges and unlock their Journal entry.
 
+**The pane validates nothing.** Live preview is pure decode and touches no state, but committing an answer writes `GameState.ciphers_solved`, so submission is a `JOURNAL_SUBMIT_REQUEST` with `kind = &"cipher"` (Doc 00 §8.3). The pane reacts to `journal_submit_committed`. Same rule for the weakness field on an incomplete entry (Doc 00 §9.2.1) — a submission can be cancelled by a same-tick hit, and the typed text survives in the field for a retry.
+
 ### 6.5 Map tab
 
 Renders the Doc 3 grid at 1:640 scale. Undiscovered zones are blank parchment; discovered ones are hand-inked. Current position is a small pine-tree marker. **No fast travel** — the map is orientation only, which is what keeps Doc 3's streaming world worth walking.
@@ -597,5 +599,6 @@ func _init() -> void:
 5. `[pause]` and `[color]` are semantic and survive accessibility stripping; everything else is decorative and does not.
 6. Stutter is seeded per line ID and never re-rolls.
 7. Inventory lives in the Journal. No second inventory UI may be added.
+7a. No UI pane writes `GameState`. Player-typed answers — ciphers and weakness fields — enqueue `JOURNAL_SUBMIT_REQUEST` and render from `journal_submit_committed` (Doc 00 §8.3).
 8. The map shows position only. **No fast travel** — it would undercut Doc 3's streaming world.
 9. All text roles scale by `Settings.text_scale`; no text container is fixed-height.

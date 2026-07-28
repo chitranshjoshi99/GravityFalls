@@ -603,7 +603,7 @@ static func vigenere(text: String, key: String, decode := false) -> String:
 	return out
 ```
 
-**Cipher puzzle flow:** a glyph string is found in the world (wall, page, UV marking) → the player opens the Journal's decode pane → types the plaintext → `CipherLock` validates case-insensitively, ignoring non-alphanumerics → the entry unlocks. Wrong answers are unlimited and free. These are flavor and discovery, never a progress wall — **every cipher-locked door has a non-cipher path**, because a player stuck on a Vigenère key should not be stuck on the chapter.
+**Cipher puzzle flow:** a glyph string is found in the world (wall, page, UV marking) → the player opens the Journal's decode pane → types the plaintext → the pane enqueues `JOURNAL_SUBMIT_REQUEST` (Doc 00 §8.3) → at priority 12 the resolver runs `CipherLock`, which validates case-insensitively, ignoring non-alphanumerics → the entry unlocks. Wrong answers are unlimited and free. These are flavor and discovery, never a progress wall — **every cipher-locked door has a non-cipher path**, because a player stuck on a Vigenère key should not be stuck on the chapter.
 
 ---
 

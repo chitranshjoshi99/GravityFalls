@@ -15,7 +15,7 @@
 | Slice depth | **Full vertical** — every Doc 1–5 system exercised at least once (§11) | A gate that skips the risky systems is not a gate |
 | Opening | Playable cold-open cart chase, then "let's rewind" | Mirrors the episode; teaches movement before mechanics |
 | Golf cart | **Scripted set-piece only.** Free-roam still unlocks Ch 9 (Doc 3 §7) | Doc 3's Act I walking scale survives; the verb is taught early, earned later |
-| Mabel | Companion → absent → escort, within one chapter | Exercises Doc 2 §9's follower in all three states |
+| Mabel | Six states in one chapter (§6.2) | Exercises Doc 2 §9's follower through create, free, and re-create |
 | Dialogue | Authored in-voice per Doc 4 §4.4; `[TRANSCRIPT]` markers where you may paste exact lines | §2.3 |
 | Cipher | Caesar −3 (Doc 3 §6.1's Ch 1–7 band) | Matches the episode's own end-credits cryptogram |
 | Target length | 40–50 min first playthrough | Long enough to expose pacing, short enough to replay while tuning |
@@ -73,14 +73,14 @@ Doc 4 §4.4 owns reveal rate, wrapper tags, and name tint. Doc 5 §6 owns blip p
 | Wendy | Counter, deadpan | neutral, bored, amused, alert |
 | **Jeff** (gnome) | Antagonist | neutral, charming, furious, defeated |
 
-Jeff is Chapter 1's addition to the roster. He is not in Doc 4 §4.4's table — add him: **reveal 52 cps, no wrapper by default, name tint `#6B8F4E` (`moss`), blip pitch 1.22 / variance ±0.09, timbre reedy square.** His register is a salesman's: warm, over-familiar, and it drops to flat menace the instant he is refused. That switch is the character.
+Jeff is Chapter 1's addition to the roster, and he is already carried into Doc 4 §4.4 and Doc 5 §6: **reveal 52 cps, no wrapper by default, name tint `#6B8F4E` (`moss`), blip pitch 1.22 / variance ±0.09, timbre reedy square.** His register is a salesman's: warm, over-familiar, and it drops to flat menace the instant he is refused. That switch is the character.
 
 ### 2.2 Authoring rules carried from Doc 4
 
 - Every mid-fight line is `Mode.BUBBLE`. Doc 4 §3.2 downgrades a `BOX` during combat and warns; Chapter 1 must never trigger that warning. §14 check 6 asserts it.
 - Dipper's anxious lines set `anxious = true` for Doc 4 §4.3's stutter. Use it in Act 2 (alone in the woods) and Act 3 (Mabel taken), **not** in Act 0 — the cold open is Dipper narrating after the fact, and he is calm about it.
 - Mabel's `[rainbow]` wrapper is her default. Drop it for exactly one line, in Act 3 when she realizes what Norman is. The absence lands harder than any effect.
-- No line needs `pause_player` — that field is gone (Doc 00 §8.3). Lines that hold the player are authored as cutscenes.
+- No line needs `pause_player` — that field is gone (Doc 00 §8.4). Lines that hold the player are authored as cutscenes.
 
 ### 2.3 Dialogue fidelity
 
@@ -89,10 +89,20 @@ Lines below are **authored in-voice**, not transcribed. They carry the scene's i
 Where a moment is iconic enough that fans would notice a substitution, the line is marked:
 
 ```
-[TRANSCRIPT: gift shop — Mabel's reaction to the grappling hook]
+[TRANSCRIPT: <act> — <whose line, and which beat>]
 ```
 
-Paste the exact line from the episode yourself if you want verbatim fidelity. Every marker has a working authored fallback beside it, so the build never blocks on an unfilled marker. There are **9 markers** in this chapter, all in Acts 0, 3, 4, and 5.
+Paste the exact line from the episode yourself if you want verbatim fidelity. Every marker has a working authored fallback beside it, so the build never blocks on an unfilled marker.
+
+**There are 5 markers in this chapter**, one per act:
+
+| Act | § | Beat |
+|---|---|---|
+| 0 | §3 | Dipper's opening narration |
+| 2 | §5.3 | Dipper on opening the compartment |
+| 3 | §6.5 | Jeff's proposal to Mabel |
+| 4 | §7.3 | Mabel's line before firing the leaf blower |
+| 5 | §9.1 | Mabel's reaction to the grappling hook |
 
 ---
 
@@ -112,10 +122,64 @@ The game opens mid-disaster, exactly as the episode does.
 5. Three scripted swerve prompts. Missing one costs nothing — this beat
    cannot be failed, and the HUD proves it by never showing damage.
 6. Hard freeze-frame on the cart mid-air. Dipper's narration begins.
-7. Chapter card (Doc 4 §7.4) wipes to Act 1.
+7. Chapter card (Doc 4 §7.4) wipes to Act 1 via §3.2's handoff.
 ```
 
 **Why it cannot be failed:** the player has had the controller for eleven seconds. A death here teaches nothing and costs a first impression. `Health` is present and the HUD is live so the player learns to read it, but every hitbox in Act 0 is disabled.
+
+### 3.1 New-game state
+
+`GameState.new_game()` seeds the checkpoint before `begin_session()` runs, because Doc 00 §3.2 mounts from `GameState.checkpoint` and a new game has no other source of truth:
+
+```gdscript
+checkpoint = {
+	&"id": &"cp_ch01_coldopen",
+	&"zone_id": &"z_woods_south",
+	&"position": <sp_ch01_coldopen>,
+	&"wake_line_id": &"",
+}
+```
+
+Act 0 is therefore savable and resumable like any other beat. Doc 00 §9.1's autosave-on-zone-activation fires normally, and a player who quits during the cold open resumes by replaying it — 90 seconds, and it is the best 90 seconds in the chapter to see twice. No autosave-suppression mechanism is needed, and none is added.
+
+### 3.2 The rewind handoff
+
+The "let's rewind" cut is a **gated zone transition** (Doc 00 §7.4), not a scene swap. Running it through the normal path means the chapter's first transition is the same code every later transition uses.
+
+```text
+1. Freeze-frame holds. Player state → CUTSCENE.
+2. Narration completes. Ch01Director enqueues GATED_ZONE_REQUEST
+   { to: z_shack_ext, spawn_marker: sp_ch01_arrival }.
+3. Resolver takes the lock; TransitionDirector fades to opaque.
+4. RuntimeDirector applies the declared teardown at Doc 00 §7.4 step 5a.
+5. activate_zone(z_shack_ext) commits palette, weirdness floor 0.05, bgm_shack.
+6. Chapter card renders over the opaque overlay, 2.5 s, skippable.
+7. Fade in. Lock releases. Arrival grace (Doc 00 §7.7), then Act 1.
+```
+
+The cold open leaves `CombatDirector` in a boss state, the player in `DRIVING`, and `Weirdness` at an event-driven 0.55 — none of which a zone change resets on its own. The chapter **declares** that cleanup as a `TransitionTeardown` (Doc 00 §7.4.1) and `RuntimeDirector` commits it; `Ch01Director` mutates nothing:
+
+```gdscript
+# res://chapters/ch01/rewind_teardown.tres
+clear_combat            = true    # boss_active false, boss_phase 0, aggro clear
+exit_vehicle            = true    # DRIVING → FREE, cart despawned, not stored (§7.2)
+restore_health          = true    # the cold open cost nothing
+release_weirdness       = true    # event level → 0; the zone floor takes over
+clear_pending_blackout  = false
+set_checkpoint          = { id: cp_ch01_porch, zone_id: z_shack_ext, ... }
+```
+
+```gdscript
+RuntimeEvents.enqueue(RuntimeEvent.Type.GATED_ZONE_REQUEST, self, {
+	&"to": &"z_shack_ext",
+	&"spawn_marker": &"sp_ch01_arrival",
+	&"teardown": preload("res://chapters/ch01/rewind_teardown.tres"),
+})
+```
+
+This is the chapter that motivated Doc 00 §7.4.1 existing, and it uses five of the resource's six fields — which is the argument for the fixed field set over a callback. Everything Chapter 1 needs is nameable in advance.
+
+Once `cp_ch01_porch` is written, `cp_ch01_coldopen` is unreachable for the rest of the game. That is intended: Act 0 is not replayable except via Chapter Select (Doc 00 §9.5).
 
 **Weirdness:** 0.55 for the duration — high, unexplained, and it drops to 0.05 the instant Act 1 begins. The contrast is the hook, and it exercises Doc 1 §2's shader at a real value in the first minute.
 
@@ -145,14 +209,37 @@ The game opens mid-disaster, exactly as the episode does.
 |---|---|---|---|
 | `npc_stan_porch` | `z_shack_ext` | Talk | Sets `ch01_met_stan`, gives the flyer errand |
 | `prop_totem_pole` | `z_shack_ext` | Read | Flavor. First `PropScannable` the player will later re-scan |
-| `door_giftshop` | `z_shack_ext` | Enter | Gated interior, 0.25 s wipe (Doc 00 §7.6) |
 | `npc_soos` | `int_giftshop` | Talk | Sets `ch01_met_soos` |
 | `npc_wendy` | `int_giftshop` | Talk | Sets `ch01_met_wendy` |
-| `prop_vending_machine` | `int_giftshop` | Turn | **Refused** — see §9.3 |
+| `prop_vending_machine` | `int_giftshop` | Turn | **Refused** — see §9.4 |
 | `prop_attic_bed` | `int_attic` | Rest | Checkpoint + autosave (Doc 00 §9.1) |
 | `sigil_pine_tree` | `int_attic` | — | Granted on first entry (Doc 3 §6.2) |
 
-### 4.3 Dialogue
+### 4.3 Interior route
+
+Doc 3 §5.1 fixes the Shack's internal topology: the gift shop is the hub, the living room hangs off it, and the attic is up the living-room stairs. Chapter 1 authors every door on that path, and no others.
+
+| `DoorBoundary` | From → To | Spawn marker | Notes |
+|---|---|---|---|
+| `door_shack_front` | `z_shack_ext` → `int_giftshop` | `sp_giftshop_front` | Gated, 0.25 s wipe (Doc 00 §7.6) |
+| `door_giftshop_out` | `int_giftshop` → `z_shack_ext` | `sp_shack_porch` | Return leg |
+| `door_giftshop_house` | `int_giftshop` → `int_living_room` | `sp_living_from_shop` | Behind Stan's counter |
+| `door_living_shop` | `int_living_room` → `int_giftshop` | `sp_giftshop_house` | Return leg |
+| `door_living_stairs` | `int_living_room` → `int_attic` | `sp_attic_stairs` | The stairs |
+| `door_attic_down` | `int_attic` → `int_living_room` | `sp_living_stairs` | Return leg |
+
+Six doors, three round trips. **`ch01_o4_attic` is `z_shack_ext → int_giftshop → int_living_room → int_attic`** — three gated transitions in a row, which is worth having early: it is the densest transition sequence in the chapter and the cheapest place for a lock or spawn-marker bug to surface.
+
+Two doors are authored as **refusals**, not routes, so the Shack reads as bigger than the slice:
+
+| Door | Refusal |
+|---|---|
+| `door_living_kitchen` | Stan: it's not a tour, and there's nothing in there but expired ham |
+| `door_living_stan_room` | Locked. Doc 3 §5.1 opens it at Ch 12 |
+
+Both use Doc 00 §7.5's refusal path — the resolver emits the line, so a refusal can never fire mid-fade.
+
+### 4.4 Dialogue
 
 > **Stan** (`grifting`, box): "You must be the kids. Congratulations, you're employees now. Don't touch anything with a price tag, and everything's got a price tag."
 > **Dipper** (`anxious`): "We just got here."
@@ -164,7 +251,7 @@ The game opens mid-disaster, exactly as the episode does.
 
 Wendy's line is doing structural work: it plants the tourist-trap framing the whole game will spend twenty chapters undermining.
 
-### 4.4 The errand
+### 4.5 The errand
 
 Stan sends Dipper into the woods with a staple gun and a stack of flyers. This is the chapter's inciting excuse, and it is also the tutorial's cover story for teaching run and stamina.
 
@@ -222,11 +309,16 @@ Two interactions rather than one because the discovery deserves a beat, and beca
 
 The moment the item lands:
 
-1. `GameState.inventory[&"journal_3"] = 1`.
-2. `Journal` autoload becomes available; `J` is bound and the Doc 4 §2.4 spine tab fades in bottom-left with a gold pulse.
-3. `Weirdness.pulse(0.65, 1.4)` — the single largest spike in Act 2.
-4. A forced-first-open cutscene: the Journal opens itself, one page, Ford's hand.
-5. Control returns with the Journal `OPEN`, so the player's first Journal experience is already inside the book.
+1. `GameState.inventory[&"journal_3"] = 1` and `ch01_journal_acquired = true`.
+2. `GameState.inventory[&"uv_penlight"] = 1` and `ch01_uv_acquired = true` — the penlight is taped inside the cover (§5.5) and is granted by the same pickup, never separately.
+3. `Journal` autoload becomes available; `J` is bound and the Doc 4 §2.4 spine tab fades in bottom-left with a gold pulse. `F` is bound at the same moment.
+4. `Weirdness.pulse(0.65, 1.4)` — the single largest spike in Act 2.
+5. A first-open cutscene: the Journal turns in Dipper's hands, one page, Ford's hand.
+6. The cutscene declares `on_complete_intent = JOURNAL_TOGGLE_REQUEST` (Doc 00 §8.2.1).
+
+Step 6 is the runtime-supported form of "the player ends up reading." Doc 00 §8.1 step 6 is absolute — a cutscene returns `FREE` with the Journal `CLOSED` — so the chapter cannot simply hand back control mid-read. The declared intent resolves on the following tick at priority 11 and opens the book through the ordinary 0.42 s `OPENING` path.
+
+The player's first Journal open is therefore the same animation, the same state machine, and the same 118 px/s movement penalty as every open afterward. Nothing about it is special-cased, which is exactly what makes it a tutorial.
 
 **Contents at acquisition** — three entries, one locked:
 
@@ -260,7 +352,75 @@ The scan runs Doc 2 §5.4's full 1.40 s with the ring, the three audible increme
 
 This is §0.1 landing. Let it sit — no NPC comments on it.
 
-### 5.7 Combat introduction
+### 5.7 Two scan-completion paths
+
+§0.1 only works if the scan system has an explicit **incomplete-entry** branch. Doc 2 §5.4 describes the populated path only, and a naive implementation will either always grant a weakness or always withhold one. Both are wrong.
+
+`JournalEntry` gains one field, and `scan_completed` branches on it:
+
+```gdscript
+# res://journal/journal_entry.gd
+class_name JournalEntry
+extends Resource
+
+@export var id: StringName
+@export var title: String
+@export_multiline var body: String
+@export var sketch: Texture2D
+
+## Empty means Ford never determined it. This is a real authored state, not
+## a missing value — see Doc 6 §0.1. Entries may ship deliberately blank.
+@export var weakness: String = ""
+## What would verify a player's answer. Authored, and present even on a blank
+## entry — a weakness Ford never found is still a weakness that exists.
+@export var accepted_answers: PackedStringArray = PackedStringArray()
+
+## Pure comparison. Holds no player state — see below.
+func verifies(text: String) -> bool:
+	var norm := _normalize(text)
+	for a in accepted_answers:
+		if _normalize(a) == norm:
+			return true
+	return false
+
+static func _normalize(t: String) -> String:
+	var s := t.strip_edges().to_lower()
+	for article in ["a ", "an ", "the "]:
+		if s.begins_with(article):
+			s = s.substr(article.length())
+	return s.trim_suffix("s")                      # blower / blowers
+```
+
+**`JournalEntry` is authored, immutable, shared data and holds nothing the player did.** What the player wrote and whether it verified live in `GameState.journal_overrides`, read through `JournalDB` (Doc 00 §9.2.1). Writing to the resource instead would lose the player's handwriting on reload *and* carry it into the next New Game, since `.tres` files are shared in memory and never saved.
+
+Reads and the single write:
+
+```gdscript
+JournalDB.weakness_written(&"entry_gnomes")   # "" until the player writes
+JournalDB.is_verified(&"entry_gnomes")        # false until they get it right
+JournalDB.damage_multiplier(&"entry_gnomes")  # 1.0, then 1.45
+# writing goes through the resolver — see §9.3, never called from UI
+JournalDB.submit_weakness(&"entry_gnomes", text)   # the only writer
+```
+
+`entry_gnomes` ships `weakness = ""` and `accepted_answers = ["leaf blower"]`, which `_normalize` also matches against "leaf blowers", "Leaf Blowers", and "a leaf blower".
+
+| Path | Condition | Scan result |
+|---|---|---|
+| **Populated** | `weakness` non-empty | Entry unlocks, weakness shown in the HUD, ×1.45 granted. Doc 2 §5.4 unchanged |
+| **Incomplete** | `weakness` empty | Entry unlocks with sketch and body. Weakness renders as `UNKNOWN —` over blank ruled lines. **No multiplier** until `JournalDB.is_verified()`. `journal_scan_done` still plays — the scan succeeded; the book is what failed |
+
+**The distinction the UI must carry:** an incomplete entry is not a locked entry. Doc 4 §6.2's locked entries show a torn-page silhouette; an incomplete one shows a *complete-looking page with an empty field*. If a player reads "no weakness found" as "scan failed", §13 question 7 fires.
+
+**Written and verified are two different things**, and conflating them would have made "banana" worth ×1.45. The page renders whatever the player typed, verbatim and permanently — that is the charm, and typing nonsense is explicitly allowed by §9.3. The damage bonus keys off `JournalDB.is_verified()` instead, so only the right answer earns it.
+
+A correct answer grants the ×1.45 retroactively. That is the payoff for §0.1's withholding, and it lands one chapter later, which is exactly when the player next fights something.
+
+An unverified entry can be resubmitted at any time from the Entries tab. The game never says the answer was wrong — the bonus simply is not there, and a player who later works it out can go back. Ford's entries are trusted on sight; the player's have to be right.
+
+Chapter 1 ships **one** incomplete entry. Every other entry in the game is populated unless a chapter doc says otherwise and states why.
+
+### 5.8 Combat introduction
 
 Two or three gnomes ambush after the scan. They are weak, slow, and telegraph heavily. What the encounter actually teaches:
 
@@ -281,21 +441,54 @@ The fumble is the most important 0.8 seconds in the slice. If playtesting says p
 
 ### 6.1 Objectives
 
-| ID | Objective | Completion |
-|---|---|---|
-| `ch01_o9_norman` | Find out what Norman is | Scan Norman |
-| `ch01_o10_follow` | Follow Mabel | Reach the clearing |
-| `ch01_o11_rescue` | Get Mabel back | Boss defeated (Act 4) |
+See §6.3 — the act's four objectives are listed there with their triggers, because the route and the objectives are the same thing.
 
-### 6.2 Mabel departs
+### 6.2 Mabel's lifecycle
 
-Back at the Shack, Mabel leaves with Norman. Companion despawns — and this is deliberately load-bearing: Doc 2 §9's follower is created, destroyed, and recreated within one chapter, so a leak shows up at the gate rather than in Chapter 12.
+Doc 2 §9's follower is created, destroyed, and recreated within this chapter, so a leak surfaces at the gate rather than in Chapter 12. That only holds if every transition has a named trigger. It does:
 
-> **Mabel** (`smitten`, `[rainbow]`): "His name is Norman and he's TALL and he doesn't talk much which I think means he's mysterious!"
-> **Dipper** (`anxious`): "Or it means something's wrong with his throat."
-> **Mabel:** "Mysterious throat!"
+| # | State | Begins on | Ends on | Node |
+|---|---|---|---|---|
+| 1 | **Follower** | `ch01_met_stan` — she joins for the errand (§4.5) | `ch01_journal_acquired` | `CompanionFollower`, leader = player |
+| 2 | **Scripted exit** | `ch01_journal_acquired` | ~6 s later | Same node, `leader = null`, walks a fixed path off-screen |
+| 3 | **Absent** | Exit path completes → `queue_free()` | `ch01_norman_revealed` | None. `ch01_mabel_present = false` |
+| 4 | **Captive** | `ch01_norman_revealed` | Phase 1 ends — she boards the cart (§7.1) | Static `Node2D` parented to the Gnomonster rig, not a follower |
+| 5 | **Escort** | Phase 2 begins (§7.2) | Phase 3 begins | Cart passenger seat, no pathing |
+| 6 | **Decoy** | Phase 3 begins (§7.3) | Jeff released | Scripted `Node2D` beside Jeff, stalling him |
+| 7 | **Follower** | `ch01_boss_defeated` | Chapter end | New `CompanionFollower` instance |
 
-### 6.3 Dipper's wrong theory
+State 2 is the piece the chapter previously left implicit. **`ch01_journal_acquired` is the despawn trigger**, and the exit is a walk-off rather than a cut, so the player sees her leave. She calls back over her shoulder; Dipper is reading and does not look up. That is the whole Act 2/3 pivot in one staged exit, and it costs one scripted path.
+
+> **Mabel** (`smitten`, `[rainbow]`, bubble, walking away): "His name is Norman and he's TALL and he doesn't talk much which I think means he's mysterious!"
+> **Dipper** (`anxious`, not looking up): "Or it means something's wrong with his throat."
+> **Mabel** (fading): "Mysterious throat!"
+
+**States 4, 5, and 6 do not overlap**, and the boundaries are the phase transitions themselves:
+
+- **4 → 5 is the rescue**, and it is the beat phase 1 exists to earn. On phase 1's exit condition, the Gnomonster's grip fails on the side Mabel is held — the same six gnomes the player knocked loose were the ones holding her. She drops, Dipper reaches the cart, both board. Roughly 5 s, scripted, unskippable, and it is the only reward phase 1 pays out.
+- **5 → 6 is her choice.** Reaching `z_shack_ext` ends phase 2; Mabel gets out and walks toward Jeff while Dipper goes for the leaf blower. The player is not consulted. She is not a passenger for the ending.
+- **6 → 7 is the boss defeat.** The decoy node is freed and a fresh `CompanionFollower` instantiated.
+
+State 3 → 4 has no player-visible spawn: Mabel is already in the clearing when the cutscene begins. The follower node is genuinely freed at the end of state 2 and a **new** node is instantiated for state 7, which is the leak test — §14 check 11 asserts the instance count returns to zero during state 3.
+
+### 6.3 The return trip and the trail
+
+The document previously jumped from the woods to "back at the Shack" with no route. The route is an objective:
+
+| ID | Objective | Trigger | Completion |
+|---|---|---|---|
+| `ch01_o9_return` | Head back and show Mabel what you found | `ch01_journal_acquired` | Reach `z_shack_ext` |
+| `ch01_o10_norman` | Find out what Norman is | Mabel's exit completes | Scan `npc_norman` |
+| `ch01_o11_follow` | Follow the trail | `ch01_norman_scanned` | Reach the NW clearing |
+| `ch01_o12_rescue` | Get Mabel back | `ch01_norman_revealed` | Boss defeated |
+
+**The return leg is not filler.** It is the seam crossed a second time, in the opposite direction, with the Journal now in hand — the first chance the player has to walk a known route while reading, and the first time `Journal.blocks_zone_travel()` (Doc 00 §7.5) can plausibly fire. Expect players to hit the boundary blocker here. That is the intended teaching moment for it.
+
+**`npc_norman` spawn:** on the Shack porch, on arrival, as a scripted appearance during the return fade — never popped in on-screen. He is a `PropScannable` as well as an NPC, because §6.4's scan needs a target.
+
+**The trail:** eight `UV_MARKING`-adjacent footprint decals from the porch to the NW clearing, revealed by proximity rather than UV so the route cannot be missed. They are visible without the penlight; using the penlight on them reveals a second set of prints — five sets, all the same size, which is the clue the game never says out loud.
+
+### 6.4 Dipper's wrong theory
 
 The player scans Norman at range. The scan returns `entry_zombie` as a **partial match with a confidence warning** — Ford's zombie page, flagged as inconclusive.
 
@@ -303,7 +496,7 @@ Dipper concludes zombie. He is wrong. The game does not correct him; the player 
 
 Mechanically this is a second, quieter lesson: a scan can mislead. It rhymes with §0.1 and it is the last time the game undermines the Journal for a long while.
 
-### 6.4 The clearing
+### 6.5 The clearing
 
 Dipper arrives to find Norman coming apart. Five gnomes, one trenchcoat.
 
@@ -320,7 +513,7 @@ Cutscene, `CUTSCENE_REQUEST` per Doc 00 §8.2, with `on_complete_flag = ch01_nor
 
 **Boss:** `boss_gnome` (Doc 5 §4.2). **Phases:** 3. **Length:** ~6 min.
 
-`CombatDirector.boss_active = true`, `boss_phase` advanced by this document. Doc 5 §4.2 lists `boss_gnome` as single-stem; Chapter 1 amends that to **phase-gated on `boss_phase`**, matching the pattern `boss_gideonbot` already uses.
+`CombatDirector.boss_active = true`, `boss_phase` advanced by this document. Doc 5 §4.2 already gates `boss_gnome` on `boss_phase`; what follows is the phase *content* that gating refers to.
 
 ### 7.1 Phase 1 — The clearing (on foot)
 
@@ -331,7 +524,7 @@ Cutscene, `CUTSCENE_REQUEST` per Doc 00 §8.2, with `on_complete_flag = ch01_nor
 | Attack 1 | Ground slam — telegraphed 0.9 s, `PUSH` anomaly field on impact (Doc 2 §6.1) |
 | Attack 2 | Gnome throw — a single gnome as a projectile, dodgeable |
 | Damage source | Loose gnomes, 1 pip each |
-| Exit condition | Survive 45 s, or knock 6 gnomes loose with melee |
+| Exit condition | Survive 45 s, or knock 6 gnomes loose with melee. **Both end in the rescue beat** (§6.2, state 4→5) |
 | Weirdness | 0.50 |
 
 The `PUSH` field on the slam is the slice's proof that Doc 2 §6.1's anomaly fields write `external_force` correctly under combat load, not just in a quiet gravity-hill test.
@@ -348,11 +541,34 @@ Stan's golf cart is parked at the clearing edge — Mabel got it there, and how 
 | Steering | Full player control within the corridor |
 | Hazards | Thrown gnomes, falling trees — dodge by steering |
 | Mabel | Escort passenger, delivers bubble lines |
-| Failure | Blackout → checkpoint at the clearing entrance, phase 2 restarts |
+| Failure | Blackout → `cp_ch01_clearing`, phase 2 **resumes** via the encounter block. **This is a cross-zone respawn** once the seam is crossed — see below |
 | Weirdness | 0.60 |
 | Exit condition | Reach `z_shack_ext` — **crosses a zone boundary while `DRIVING`** |
 
 That last row is not incidental. Doc 00 §5.3 asserts vehicles cross boundaries; this is the chapter that proves it, under threat, with an escort NPC and an active boss. If it breaks, it breaks here rather than in Chapter 9 when the cart is real.
+
+**Dying after the seam is a cross-zone respawn**, and Chapter 1 claims it as coverage rather than avoiding it. The checkpoint (`cp_ch01_clearing`) is in `z_woods_south`; the player can die in `z_shack_ext`. Doc 00 §11.2 step 3 therefore runs its gated-travel branch, with the overlay already opaque from the blackout.
+
+Everything about that path is load-bearing and none of it is exercised anywhere else in the chapter: the destination zone must mount, the boss must resume at phase 2 rather than restart at phase 1, the cart must be re-placed at the corridor start, and Mabel must return to escort state.
+
+Doc 00 §11.2's ordinary respawn does the opposite of all that — step 5 calls `CombatDirector.reset()`, which would drop the player back at the clearing with no boss and an unwinnable chapter. The supported path is Doc 00 §11.3's **encounter block**, armed on the checkpoint when the phase begins:
+
+```gdscript
+# armed on entering phase 2 — a request, not a write (Doc 00 §11.3)
+RuntimeEvents.enqueue(RuntimeEvent.Type.ENCOUNTER_STATE_REQUEST, self, {
+	&"boss_id": &"boss_gnome",
+	&"phase": 2,
+	&"setup": &"ch01_gnomonster_ph2",   # registered with CombatDirector at _ready
+})
+```
+
+`ch01_gnomonster_ph2` is a named setup, not a script: the Gnomonster rig at the corridor start, the cart at its spawn, and Mabel in the passenger seat. Doc 00 §11.3 instantiates it in place of step 5's reset.
+
+**The block is cleared on `ch01_boss_defeated`** — an `ENCOUNTER_STATE_REQUEST` with an empty payload. A player who walks back to that clearing in a later chapter finds it empty, not haunted by a boss that respawns forever. §14 check 12 covers both directions.
+
+`Ch01Director` writes neither the checkpoint nor the encounter block. It registers `ch01_gnomonster_ph2` with `CombatDirector` at `_ready()` and enqueues two events across the whole fight.
+
+The alternative — keeping the chase inside one zone — would be simpler and would test less. Given that this chapter exists to be a gate, the harder version is the right one.
 
 ### 7.3 Phase 3 — The leaf blower
 
@@ -380,9 +596,9 @@ Mabel's kissing-practice leaf blower is on the Shack porch. The player grabs it 
 | 0 (cold open) | `base` + `dread` only | §2.2 |
 | 1 | `base` + `unease` | Cut on bar boundary, §4.4 |
 | 2 | All four, `dread` at 0.7 | Crossfade over one bar |
-| 3 | `dread` solo, then hard stop on the fire | §4.2 |
+| 3 | `dread` solo, then hard stop on Jeff's release | §4.2 |
 
-The hard stop in phase 3 is a beat of near-silence before the collapse SFX. It costs nothing and it is the loudest moment in the chapter.
+The hard stop lands the instant the leaf blower releases Jeff — a beat of near-silence before the collapse SFX. It costs nothing and it is the loudest moment in the chapter.
 
 ---
 
@@ -437,7 +653,26 @@ Stan lets each twin take one item from the gift shop.
 | Recipient | Item | Mechanical effect |
 |---|---|---|
 | Dipper | The pine-tree hat | **Cosmetic.** Rig swap per Doc 1. Becomes his sprite for the rest of the game |
-| Mabel | Grappling hook | **Verb unlock.** Doc 2 §7.2's 20-stamina grapple, usable from Ch 2 |
+| Mabel | Grappling hook | **Verb unlock**, but not immediately and not for her — see §9.2 |
+
+### 9.2 The grapple handoff
+
+Mabel picks the grappling hook. Dipper is the only playable character (Doc 2 §0). The ownership transfer has to be recorded, or the item exists in narrative and not in the save.
+
+**Chapter 1 grants nothing playable.** The hook enters the save as a party item flagged to Mabel:
+
+```gdscript
+GameState.inventory[&"grappling_hook"] = 1
+GameState.flags[&"ch01_grapple_owner"] = &"mabel"     # not yet Dipper's
+```
+
+While `ch01_grapple_owner == &"mabel"`, the hook does **not** appear in Doc 4 §6.3's items grid, is not selectable in the radial, and `item_use` cannot fire it. It is visible in the Journal's Items tab as a greyed entry captioned in Mabel's voice, which is the only place the player learns it exists as a real object.
+
+**Chapter 2 performs the handoff** in one scripted beat: Mabel gets bored of it inside a day, and it moves to Dipper. That sets `ch01_grapple_owner = &"dipper"`, at which point Doc 2 §7.2's 20-stamina grapple becomes a live verb.
+
+Two reasons to split it across chapters rather than granting it here. It is funnier — the joke is that she loses interest, and the joke needs a gap to land in. And it keeps Chapter 1's verb count honest: the slice already teaches move, run, interact, journal, scan, UV, attack, dodge, item use, and drive. An eleventh verb in the final two minutes would be taught to nobody.
+
+§14 check 13 asserts the hook is un-equippable while owned by Mabel — the one place a player could otherwise carry a Chapter 2 verb into a Chapter 1 replay.
 
 > [TRANSCRIPT: gift shop — Mabel's reaction to the grappling hook]
 > **Mabel** (`delighted`, `[rainbow]`, fallback): "Grappling hook! I'm never walking anywhere again!"
@@ -447,13 +682,15 @@ Stan lets each twin take one item from the gift shop.
 
 The grappling hook going to Mabel and the verb going to the player is intentional. Chapter 2 explains it in one line: she gets bored of it in a day.
 
-### 9.2 The Journal entry
+### 9.3 The Journal entry
 
 In the attic, Dipper writes. The player is handed the pen: a short text-entry beat where the weakness field of `entry_gnomes` is filled in.
 
 The field accepts anything. Typing nonsense is permitted and the game does not correct it — but the canonical `leaf blowers` earns `ch01_weakness_written` and a small gold flourish. This is the chapter's thesis made interactive: the player added to the Journal.
 
-### 9.3 The stinger
+The UI collects the text and nothing more. It enqueues `JOURNAL_SUBMIT_REQUEST { kind: weakness, target: entry_gnomes, text }` (Doc 00 §8.3); the resolver calls `JournalDB.submit_weakness()` at priority 12, writes `GameState.journal_overrides`, marks the save dirty, and emits `journal_submit_committed` for the page to render from. Whatever the player typed is on that page for the rest of the playthrough, in their words, and it survives every reload.
+
+### 9.4 The stinger
 
 Player control returns for ~20 seconds in the gift shop, at night, with nothing to do.
 
@@ -471,18 +708,20 @@ All flags carry the `ch01_` prefix per Doc 00 §9.2, except the two shared-names
 
 | Flag | Set by | Read by |
 |---|---|---|
-| `ch01_met_stan` | §4.2 | §4.4 errand gate |
+| `ch01_met_stan` | §4.2 | §4.5 errand gate |
 | `ch01_met_soos` · `ch01_met_wendy` | §4.2 | Ch 2 greeting variants |
 | `ch01_flyers_stapled` (int 0–3) | §5.2 | `ch01_o5_flyers` |
 | `ch01_journal_acquired` | §5.4 | **Everything.** Global gate on the `J` binding |
-| `ch01_uv_acquired` | §5.5 | Doc 2 §5.5 `F` binding |
+| `ch01_uv_acquired` | §5.4 | Doc 2 §5.5 `F` binding. Granted with the Journal, never separately |
 | `ch01_gnomes_scanned` | §5.6 | `entry_gnomes` unlock |
-| `ch01_norman_revealed` | §6.4 | Boss start |
+| `ch01_norman_scanned` | §6.4 | `ch01_o11_follow` gate |
+| `ch01_norman_revealed` | §6.5 | Boss start |
 | `ch01_boss_defeated` | §7.3 | §9.1 reward |
-| `ch01_weakness_written` | §9.2 | Ch 20 Zodiac epilogue text |
+| `ch01_grapple_owner` (StringName) | §9.2 | Ch 2 handoff; gates the grapple verb |
+| `ch01_weakness_written` | §9.3 | Ch 20 Zodiac epilogue text |
 | `ch01_cipher_solved` | §8.1 | Optional; Ciphers tab count |
 | `zone_shack_unlocked` | §4.1 | Shared namespace — Doc 3 zone gating |
-| `npc_wendy_trust` = 1 | §4.3 | Shared namespace — Ch 6+ |
+| `npc_wendy_trust` = 1 | §4.4 | Shared namespace — Ch 6+ |
 
 `ch01_journal_acquired` is the only flag in the chapter that alters the input map at runtime. It is worth calling out because it is the one flag whose absence would make a mid-chapter save unloadable if it were ever cleared — §14 check 4 covers it.
 
@@ -499,16 +738,16 @@ All flags carry the `ch01_` prefix per Doc 00 §9.2, except the two shared-names
 | 1 §3–7 | Character rigs, 8-dir anim | Throughout | Dipper, Mabel, 4 NPCs, gnomes |
 | 2 §1.2 | Fake-Z `HeightBody` | Thrown gnomes, phase 1 | Shadow shrink on arc |
 | 2 §3 | Movement, run, stamina | §5.2 flyer 3 | Stamina ribbon drains |
-| 2 §3.4 | Dodge + i-frames | §5.7 | Roll, brief invulnerability |
-| 2 §4 | Melee, item use | §5.7, §7.3 | Attack, leaf blower |
+| 2 §3.4 | Dodge + i-frames | §5.8 | Roll, brief invulnerability |
+| 2 §4 | Melee, item use | §5.8, §7.3 | Attack, leaf blower |
 | 2 §5.1–5.3 | Journal state machine | §5.4 onward | Open 0.42 s, camera offset |
-| 2 §5.2 | **Fumble** | §5.7 | Book dropped, 0.80 s lockout |
-| 2 §5.4 | Scan | §5.6, §6.3 | Ring fills, entry unlocks |
+| 2 §5.2 | **Fumble** | §5.8 | Book dropped, 0.80 s lockout |
+| 2 §5.4 | Scan | §5.6, §5.7, §6.4 | Ring fills, entry unlocks |
 | 2 §5.5 | UV | §8.2 | Beam, ink reveal |
 | 2 §5.6 | Ciphers | §8.1 | Decode pane, live preview |
 | 2 §6.1 | Anomaly fields | §7.1 slam | Knockback from `PUSH` |
 | 2 §7 | Health, blackout, checkpoint | §7.2 failure | Respawn, no progress lost |
-| 2 §9 | Companion follower | §4.4, §6.2, §7.2 | Follows, despawns, escorts |
+| 2 §9 | Companion follower | §6.2 — all six states | Follows, despawns, escorts |
 | 3 §2 | Layer stack, Y-sort | Throughout | Dipper behind/in front of trees |
 | 3 §2.2 | Canopy fade | `z_woods_south` | Canopy goes translucent |
 | 3 §3 | **Streaming + seam** | §5 crossing | No hitch, no fade |
@@ -521,7 +760,7 @@ All flags carry the `ch01_` prefix per Doc 00 §9.2, except the two shared-names
 | 4 §4 | Rich text, per-voice | Mabel, Dipper, Jeff | Rainbow, stutter, reveal rates |
 | 4 §5 | Accessibility | Settings toggle | FX strip, text scale |
 | 4 §6 | Journal UI, 5 tabs | §5.4 onward | All five tabs populated |
-| 4 §7 | Menus, chapter card | Boot, §3, §9.3 | Main menu, card |
+| 4 §7 | Menus, chapter card | Boot, §3, §9.4 | Main menu, card |
 | 5 §1–2 | Buses, 4-stem rack | §5.3 unease rise | Stems shift with weirdness |
 | 5 §3 | Zone crossfade | §5 seam | 2.5 s BGM blend |
 | 5 §4.2 | Boss audio, phases | Act 4 | Cut on bar, phase changes |
@@ -530,18 +769,19 @@ All flags carry the `ch01_` prefix per Doc 00 §9.2, except the two shared-names
 | 5 §7 | Procedural placeholders | Everywhere | **Ships with zero real audio** |
 | 00 §3 | Boot, session | Launch | Menu → New Game → play |
 | 00 §7 | Zone travel, both kinds | §5, §4.2 | Seamless and gated |
-| 00 §9 | Save, autosave, chapter | §4.2, §9.3 | Quit and continue mid-chapter |
+| 00 §9 | Save, autosave, chapter | §4.2, §9.4 | Quit and continue mid-chapter |
 | 00 §10 | Pause | Anywhere | Esc, and it refuses mid-fade |
 | 00 §11 | Blackout, respawn | §7.2 | Wake at checkpoint |
+| 00 §11.2 | **Cross-zone respawn** | §7.2, dying after the seam | Destination zone re-mounts, boss resumes at phase 2 |
 
-**Four systems are deliberately NOT exercised in Chapter 1**, and each is flagged so the gate does not falsely claim coverage:
+**Three systems are deliberately NOT exercised in Chapter 1**, and each is flagged so the gate does not falsely claim coverage:
 
 | Not covered | First covered | Why not here |
 |---|---|---|
 | Time recorder / rewind (Doc 2 §6.2) | Ch 7 | No time mechanic in this episode |
 | Boat traversal (Doc 3 §5.3) | Ch 2 | Lake is Ch 2 |
 | Chapter Select scratch save (Doc 00 §9.5) | Needs 2 chapters | Nothing to select yet |
-| Cross-zone respawn (Doc 00 §11.2) | Ch 3 | Both Ch 1 checkpoints are in the death zone |
+
 
 ---
 
@@ -647,9 +887,12 @@ func _init() -> void:
 	# --- 2. The gnome entry must ship WITHOUT a weakness (§0.1) ------------
 	var e := JournalDB.entry(&"entry_gnomes")
 	assert(e.weakness.is_empty(),
-		"entry_gnomes must ship blank — the player writes it in (§9.2)")
-	assert(e.damage_multiplier == 1.0,
+		"entry_gnomes must ship blank — the player writes it in (§9.3)")
+	assert(not JournalDB.is_verified(&"entry_gnomes")
+		and JournalDB.damage_multiplier(&"entry_gnomes") == 1.0,
 		"a scan with no weakness must grant no damage bonus")
+	assert(not e.accepted_answers.is_empty(),
+		"a deliberately blank entry must still declare what would verify it")
 
 	# --- 3. Every flag this chapter writes is in its own namespace --------
 	for f in Ch01Director.WRITTEN_FLAGS:
@@ -695,6 +938,92 @@ func _init() -> void:
 	for z in Ch01Director.ZONES:
 		assert(ZoneManager.has_def(z), "Ch 1 references unregistered zone: %s" % z)
 
+	# --- 11. Mabel's follower is genuinely freed, not just hidden (§6.2) --
+	var h := Ch01Harness.new()
+	h.advance_to(&"ch01_journal_acquired")
+	h.run_ticks(360)                       # cover the 6 s scripted exit
+	assert(h.follower_instance_count() == 0,
+		"Mabel's follower must be freed during state 3, not parked off-screen")
+	h.advance_to(&"ch01_boss_defeated")
+	assert(h.follower_instance_count() == 1,
+		"state 6 must instantiate exactly one new follower")
+
+	# --- 12. Cross-zone respawn resumes the fight, not restarts it (§7.2) -
+	h.reset()
+	h.enter_boss_phase(2)
+	h.cross_seam_to(&"z_shack_ext")
+	h.kill_player()
+	h.run_until_player_free()
+	assert(ZoneManager.current_zone == &"z_woods_south",
+		"respawn must re-mount the checkpoint's zone")
+	assert(CombatDirector.boss_active, "the boss fight is still on after a respawn")
+	assert(CombatDirector.boss_phase == 2, "respawn must resume phase 2, not phase 1")
+	assert(h.mabel_state == Ch01Harness.MabelState.ESCORT, "Mabel returns as escort")
+	h.defeat_boss()
+	assert(GameState.checkpoint.encounter.is_empty(),
+		"defeating the boss must clear the encounter block, or the clearing stays haunted")
+
+	# --- 15. Mabel's states never overlap (§6.2) --------------------------
+	h.reset()
+	var seen: Array[int] = []
+	h.play_through(func(state: int) -> void:
+		if seen.is_empty() or seen.back() != state:
+			assert(not seen.has(state) or state == Ch01Harness.MabelState.FOLLOWER,
+				"Mabel re-entered a non-follower state: %d" % state)
+			seen.append(state))
+	assert(h.concurrent_mabel_nodes_max() == 1,
+		"captive, escort, and decoy must never be live at the same time")
+
+	# --- 13. The grapple is inert while Mabel owns it (§9.2) --------------
+	var g := GameState.new_game()
+	g.inventory[&"grappling_hook"] = 1
+	g.flags[&"ch01_grapple_owner"] = &"mabel"
+	assert(not ItemDB.is_equippable(&"grappling_hook", g),
+		"the hook must not be usable until Ch 2's handoff")
+	g.flags[&"ch01_grapple_owner"] = &"dipper"
+	assert(ItemDB.is_equippable(&"grappling_hook", g),
+		"the hook must become usable once transferred")
+
+	# --- 14. The incomplete-entry branch, both directions (§5.7) ---------
+	GameState.new_game()
+	const GN := &"entry_gnomes"
+	assert(JournalDB.weakness_written(GN).is_empty()
+		and JournalDB.damage_multiplier(GN) == 1.0,
+		"a blank entry starts unwritten and grants no bonus")
+
+	assert(JournalDB.submit_weakness(GN, "banana") == false, "nonsense must not verify")
+	assert(JournalDB.weakness_written(GN) == "banana",
+		"nonsense is still written to the page, verbatim — it just earns nothing")
+	assert(JournalDB.damage_multiplier(GN) == 1.0, "an unverified entry grants no bonus")
+
+	assert(JournalDB.submit_weakness(GN, "  Leaf Blowers ") == true,
+		"case, whitespace, plural, and articles must all normalize")
+	assert(JournalDB.damage_multiplier(GN) == 1.45,
+		"a verified entry grants the bonus retroactively")
+
+	# --- 15. The player's writing survives a reload (Doc 00 §9.2.1) ------
+	var reloaded := GameState.deserialize(GameState.serialize(GameState.current()))
+	assert(reloaded.journal_overrides[GN][&"weakness_written"] == "  Leaf Blowers ",
+		"the player's exact text must round-trip")
+	assert(reloaded.journal_overrides[GN][&"weakness_verified"],
+		"the verified bonus must survive a reload")
+
+	# --- 16. A new game carries no handwriting from the last one ---------
+	GameState.new_game()
+	assert(GameState.current().journal_overrides.is_empty(),
+		"JournalEntry resources are shared — a new game must start clean")
+	assert(JournalDB.damage_multiplier(GN) == 1.0,
+		"the previous playthrough's bonus must not leak into a new game")
+
+	# --- 17. Ford's own entries are trusted without verification ----------
+	assert(JournalDB.is_verified(&"entry_zombie")
+		and JournalDB.damage_multiplier(&"entry_zombie") == 1.45,
+		"an authored weakness needs no player verification")
+
+	# --- 18. The encounter block is armed by event, never written --------
+	for w in Ch01Director.DIRECT_GAMESTATE_WRITES:
+		assert(false, "Ch01Director must not write GameState directly: %s" % w)
+
 	print("ch01: all checks passed")
 	quit()
 ```
@@ -708,9 +1037,16 @@ Check 2 is the one to watch. It is the only automated test in the project whose 
 1. **Chapter 1 is the vertical slice.** Every system in Docs 1–5 is exercised here at least once, per §11's matrix, or explicitly listed as deferred.
 2. The Journal ships with `entry_gnomes` weakness blank. The player writes it. No later chapter may pre-fill it.
 3. The golf cart is a scripted set-piece in Chapter 1 and grants no persistent vehicle. Doc 3 §7's Chapter 9 unlock stands.
-4. Jeff joins Doc 4 §4.4's speaker table: 52 cps, `moss` tint, blip 1.22 / ±0.09.
-5. `boss_gnome` is phase-gated on `CombatDirector.boss_phase`, amending Doc 5 §4.2's "single".
+4. Jeff is in Doc 4 §4.4's speaker table and Doc 5 §6's blip table: 52 cps, `moss` tint, blip 1.22 / ±0.09.
+5. `boss_gnome`'s three phases are defined here; Doc 5 §4.2 gates them on `CombatDirector.boss_phase`.
 6. The UV penlight is Chapter 1's only invented item, taken to exercise Doc 2 §5.5. It is a flagged deviation (§5.5), not a precedent.
 7. The grappling hook is granted at chapter end and is usable from Chapter 2 (Doc 2 §7.2 pricing).
 8. Chapter 1 writes only `ch01_`, `zone_`, and `npc_` flags, per Doc 00 §9.2.
-9. Chapter 2 opens the morning after, at the attic checkpoint, with the Journal, penlight, hat, and grapple already in hand.
+9. `JournalEntry.weakness` may ship deliberately empty. **Written and verified are separate:** the page renders whatever the player typed, and only a match against `accepted_answers` earns Doc 2 §5.4's ×1.45.
+9a. The player's writing lives in `GameState.journal_overrides` and is read through `JournalDB` (Doc 00 §9.2.1). No chapter mutates a `JournalEntry` resource.
+10. Chapter 1 grants no usable grapple. `ch01_grapple_owner` gates the verb, and Chapter 2 performs the handoff.
+11. Act 0 seeds `cp_ch01_coldopen` and is resumable. The rewind handoff declares a `TransitionTeardown` (Doc 00 §7.4.1); `Ch01Director` commits nothing itself.
+12. The first Journal open is a cutscene `on_complete_intent` (Doc 00 §8.2.1), so it plays the ordinary `OPENING` path and can lose to a same-tick hit.
+13. The phase-2 checkpoint carries an `encounter` block, armed and cleared by `ENCOUNTER_STATE_REQUEST` (Doc 00 §11.3). `Ch01Director` writes no `GameState` field directly — its entire mutation surface is enqueued events and two declarative resources.
+14. Mabel occupies exactly one of seven states at a time (§6.2); captive, escort, and decoy never overlap.
+15. Chapter 2 opens the morning after, at the attic checkpoint, with the Journal, penlight, and hat in hand — and the grapple in Mabel's.

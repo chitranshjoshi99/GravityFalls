@@ -13,7 +13,10 @@ config/features=PackedStringArray("4.4")
 
 [autoload]
 
+; Doc 00 §2.2's registration order is load-bearing: an autoload may only
+; reference autoloads registered above it during _ready().
 Tokens="*res://autoload/tokens.gd"
+Weirdness="*res://autoload/weirdness.gd"
 
 [display]
 

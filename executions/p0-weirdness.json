@@ -1,0 +1,66 @@
+{
+  "requirement": "Build tracker row 0.6: the Weirdness autoload (target_level / applied, bind(), pulse() / release() / set_zone_floor()) and the weirdness palette-ramp shader, per Doc 01 §2 and §2.1, gated by Doc 00 §12 check 36.",
+  "repo": "/Users/chitranshjoshi/Work/GravityFalls",
+  "checkpointEvery": 3,
+  "toolchain": {
+    "godot": "/Applications/Godot.app/Contents/MacOS/Godot (4.7.1.stable), symlinked to /opt/homebrew/bin/godot",
+    "testCommand": "godot --headless --script res://tests/test_all.gd"
+  },
+  "priorState": "Rows 0.1-0.3 landed in commit 72a4a91. Rows 0.4 and 0.5 (Tokens, Palette, CharacterProportions, Tube, Eyes) were built in a separate session and are present but uncommitted: autoload/tokens.gd, core/{palette,character_proportions,tube,eyes}.gd, resources/palettes/pal_woods.tres, resources/proportions/prop_dipper.tres, plus their checks in tests/test_all.gd.",
+  "architecture": {
+    "decision": null,
+    "seams": [
+      "`applied` is the only number any other system reads — the shader, the audio stems, the bus sends, the whisper gain. `target_level` is a computed getter, max(zone floor, event level), and is never rendered or mixed against. `level_changed` carries `applied`. Doc 00 §12 check 36 exists to keep those from becoming two floats on two curves.",
+      "`_apply()` is the single writer of `applied`, and `_retween()` kills any running tween before starting a new one, so at most one tween writes the value in a frame.",
+      "`set_zone_floor()` belongs to `ZoneManager.activate_zone()` alone (Doc 00 §7.2). `pulse()` and `release()` may be called from anywhere — Weirdness is presentation state and is the one system with no resolver requirement. `PaletteRegion` applies colours only and must never touch the grade.",
+      "There is exactly one grade ColorRect in the whole game, on world_root's CanvasLayer 100, and SessionDirector.begin_session() binds it. Nothing in this row creates that node — it belongs to rows 2.2 and 0.12 — so Weirdness must stay usable with a bare ShaderMaterial and no node of its own."
+    ],
+    "adr": null,
+    "note": "No architecture pre-pass. Doc 01 §2.1 gives the autoload's full source and Doc 01 §2 gives the shader's; there is no open design fork in this row."
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Add the weirdness palette-ramp shader",
+      "trackerRow": "0.6",
+      "intent": "Create res://shaders/weirdness.gdshader exactly as Doc 01 §2 specifies: a canvas_item shader reading the screen texture, with a single `weirdness` uniform driving chromatic aberration, a hot/cold luma-keyed tint ramp, a saturation push, and a closing vignette. This is the visual half of the one float that runs the supernatural axis.",
+      "files": ["shaders/weirdness.gdshader"],
+      "constraints": "Transcribe Doc 01 §2's source. Do not retune the constants — aberration_px 6.0, vignette_strength 0.55, saturation_push 0.6, tint_hot bill_yellow (1.000, 0.824, 0.247), tint_cold portal_pink (1.000, 0.247, 0.643) — those are authored values other docs reference. Keep aberration_px a uniform: tracker row 0.7's `reduce_flashing` toggle clamps it, so it cannot become a literal. Do not add the uv_reveal shader; that is a later row.",
+      "acceptance": "res://shaders/weirdness.gdshader loads as a Shader with no compile error and exposes a float uniform named `weirdness`.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": "The grade cannot be seen until a ColorRect carries it on world_root (row 2.2) with a scene behind it. No visual check is possible in this row; the observation is carried to row 2.2.",
+      "depends_on": [],
+      "status": "done",
+      "result": "shaders/weirdness.gdshader transcribed from Doc 01 §2; loads as a Shader and exposes the weirdness and aberration_px uniforms."
+    },
+    {
+      "id": "T2",
+      "title": "Add the Weirdness autoload and register it second",
+      "trackerRow": "0.6",
+      "intent": "Create res://autoload/weirdness.gd per Doc 01 §2.1 and register it in project.godot as autoload #2, directly after Tokens, per Doc 00 §2.2's load-bearing registration order.",
+      "files": ["autoload/weirdness.gd", "project.godot"],
+      "constraints": "Follow Doc 01 §2.1's source. `target_level` is a getter returning maxf(_zone_floor, _event_level) — never a stored field. `applied` is written only in `_apply()`. `_retween()` kills a running tween before creating the next one. `set_zone_floor()` and `pulse()` both clamp to 0..1. `bind()` applies immediately so a freshly bound material is never a frame stale. Registration must sit after Tokens and before every other autoload; nothing else in project.godot changes. Do not build the grade ColorRect, the 0.06 visibility skip, or the CanvasModulate fallback — those need world_root and belong to row 2.2.",
+      "acceptance": "Weirdness is registered as `*res://autoload/weirdness.gd` in project.godot immediately after Tokens; the script instantiates, tweens, clamps, and drives a bound ShaderMaterial's `weirdness` parameter.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T1"],
+      "status": "done",
+      "result": "autoload/weirdness.gd per Doc 01 §2.1, registered in project.godot immediately after Tokens. target_level stays a getter, applied is written only in _apply(), _retween() kills the running tween first."
+    },
+    {
+      "id": "T3",
+      "title": "Write Doc 00 §12 check 36 into the suite",
+      "trackerRow": "0.6",
+      "intent": "Append row 0.6's Verify column to res://tests/test_all.gd: `level_changed` carries `applied` and not `target_level`, and a `pulse()` mid-tween leaves exactly one writer of the driven value. Drive the tween deterministically rather than waiting on frames, so the check is a pure function of the calls made.",
+      "files": ["tests/test_all.gd"],
+      "constraints": "A `--script` SceneTree does not instantiate project autoloads, so the check must instantiate weirdness.gd itself and add it to `root` (create_tween() requires a node in the tree). Advance the tween with Tween.custom_step() rather than awaiting frames — the check must be deterministic and must not depend on wall-clock timing. Assert that after set_zone_floor(0.8) but before the tween advances, target_level is 0.8 while applied is still 0.0, and that the value carried by level_changed equals applied at every emission. Assert that a pulse() mid-tween kills the previous tween, so exactly one tween is writing. Free the node when done so the check leaves no residue. Do not weaken or reword the existing 0.1/0.2/0.4/0.5 checks. The stem half of check 36 — one writer of a stem's volume_db — cannot be asserted until AudioDirector exists at row 3.2; note that in the file rather than faking it.",
+      "acceptance": "'godot --headless --script res://tests/test_all.gd' exits 0 with the new checks green, and breaking level_changed to carry target_level instead of applied makes it exit nonzero.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T2"],
+      "status": "done",
+      "result": "Check 36 appended to tests/test_all.gd; suite green at 165 checks. Two negative tests confirm the gate bites: emitting target_level instead of applied fails 2 checks, and dropping the tween kill in _retween() fails the one-writer check.",
+      "finding": "tests/test_all.gd now awaits one process_frame before any check runs. A node added to `root` during a SceneTree `_init()` reports is_inside_tree() == false, and a Tween bound to a node outside the tree does not advance even under custom_step() — the first version of this check passed while asserting nothing. Every later row that needs a live node inherits the fix."
+    }
+  ]
+}

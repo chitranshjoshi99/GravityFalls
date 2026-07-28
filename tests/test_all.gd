@@ -96,6 +96,11 @@ const SKIPPED_DIRS: PackedStringArray = [
 
 
 func _init() -> void:
+	# One frame before anything runs. A node added to `root` during `_init()` is
+	# not yet inside the tree, and a Tween bound to a node outside the tree does
+	# not advance — which would make row 0.6's check silently assert nothing.
+	await process_frame
+
 	var h := RuntimeHarness.new()
 
 	_check_display_settings(h)   # tracker 0.1
@@ -216,6 +221,89 @@ func _check_geometry(h) -> void:
 	var offset := EyeGeometry.pupil_offset(Vector2(9.0, -4.0), pupil_max_offset)
 	h.expect(offset.length() <= pupil_max_offset + 0.001, "pupil never escapes the sclera")
 	h.expect(pupil_radius + pupil_max_offset <= radius, "pupil geometry fits inside the sclera")
+
+
+## Tracker 0.6 / Doc 00 §12 check 36. `level_changed` must carry `applied` — the
+## eased value — and never `target_level`, which snaps the instant a pulse is
+## requested. If those two ever diverge, "one float runs the supernatural"
+## becomes two floats on two curves, and the visuals and the audio drift apart
+## at exactly the authored moments that matter.
+##
+## The tween is advanced with custom_step() rather than by awaiting frames, so
+## this check is a pure function of the calls made and cannot flake on timing.
+##
+## The other half of check 36 — that a mid-tween pulse leaves exactly one writer
+## of a *stem's* volume_db — needs AudioDirector, which arrives at tracker row
+## 3.2. What is asserted here is the upstream cause: exactly one live tween
+## writing `applied`. The stem assertion is appended when the stems exist.
+func _check_weirdness(h) -> void:
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/Weirdness"), "*res://autoload/weirdness.gd",
+		"Weirdness autoload registration"
+	)
+
+	var shader := load("res://shaders/weirdness.gdshader")
+	h.expect(shader is Shader, "weirdness.gdshader loads as a Shader")
+	if shader is Shader:
+		var uniforms: PackedStringArray = []
+		for u in shader.get_shader_uniform_list():
+			uniforms.append(String(u["name"]))
+		h.expect(uniforms.has("weirdness"), "shader exposes the weirdness uniform")
+		# Row 0.7's reduce_flashing clamps this, so it cannot become a literal.
+		h.expect(uniforms.has("aberration_px"), "shader keeps aberration_px a uniform")
+
+	# create_tween() needs a node in the tree, and a --script SceneTree does not
+	# instantiate project autoloads, so the check builds its own instance.
+	var w: Node = WeirdnessScript.new()
+	root.add_child(w)
+
+	var seen: Array[float] = []
+	w.level_changed.connect(func(v: float) -> void: seen.append(v))
+
+	w.set_zone_floor(0.8, 1.2)
+	h.expect_eq(w.target_level, 0.8, "zone floor sets the target")
+	h.expect_eq(w.applied, 0.0, "applied does not snap to the target")
+	h.expect(seen.is_empty(), "no emission before the tween moves")
+
+	w._tween.custom_step(0.6)
+	h.expect(
+		w.applied > 0.0 and w.applied < 0.8,
+		"applied eases toward the target, got %f" % w.applied
+	)
+	h.expect(not seen.is_empty(), "the tween emits level_changed")
+	if not seen.is_empty():
+		h.expect_eq(seen[-1], w.applied, "level_changed carries applied")
+		for v in seen:
+			h.expect(v != 0.8, "level_changed never carries the snapped target")
+
+	# A pulse landing mid-tween must replace the curve, not race it.
+	var superseded: Tween = w._tween
+	w.pulse(1.0, 0.4)
+	h.expect(not superseded.is_running(), "a mid-tween pulse kills the running tween")
+	h.expect(w._tween != superseded, "a mid-tween pulse starts exactly one new tween")
+	h.expect_eq(w.target_level, 1.0, "an event above the floor wins")
+
+	# Releasing the event decays back to the floor, not to zero.
+	w.release(0.4)
+	h.expect_eq(w.target_level, 0.8, "release returns to the zone floor")
+
+	w.pulse(5.0)
+	h.expect_eq(w.target_level, 1.0, "pulse clamps above one")
+	w.release(0.1)
+	w.set_zone_floor(-3.0)
+	h.expect_eq(w.target_level, 0.0, "zone floor clamps below zero")
+
+	# bind() applies immediately, so a freshly bound material is never a frame stale.
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	w.applied = 0.42
+	w.bind(mat)
+	h.expect_eq(
+		mat.get_shader_parameter("weirdness"), w.applied,
+		"bind() drives the material immediately"
+	)
+
+	w.free()
 
 
 func _signed_area(points: PackedVector2Array) -> float:

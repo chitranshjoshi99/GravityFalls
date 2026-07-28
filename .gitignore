@@ -1,0 +1,26 @@
+# Godot 4
+.godot/
+/android/
+export_presets.cfg
+*.translation
+
+# Exports / builds
+build/
+exports/
+*.app/
+*.dmg
+*.zip
+*.wasm
+
+# Baked placeholder audio (regenerated at startup, see docs/05 §7)
+art/generated/
+audio/generated/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editors
+.vscode/
+.idea/
+*.swp

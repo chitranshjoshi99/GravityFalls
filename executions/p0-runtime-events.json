@@ -1,0 +1,68 @@
+{
+  "requirement": "Build tracker row 0.9: the RuntimeEvent record and the RuntimeEvents double-buffered queue (swap / enqueue / defer / take), per Doc 00 §2.5 and §4.6, gated by Doc 00 §12 check 16 — the input-loss regression test.",
+  "repo": "/Users/chitranshjoshi/Work/GravityFalls",
+  "checkpointEvery": 3,
+  "toolchain": {
+    "godot": "/Applications/Godot.app/Contents/MacOS/Godot (4.7.1.stable), symlinked to /opt/homebrew/bin/godot",
+    "testCommand": "godot --headless --script res://tests/test_all.gd"
+  },
+  "priorState": "Rows 0.1-0.8 are done and committed (72a4a91, ab5a1f9, f912540, a039e95). Autoloads registered so far, in Doc 00 §2.2 order: Tokens, Weirdness, Settings, GameState. core/ holds palette.gd, character_proportions.gd, tube.gd, eyes.gd, save_data.gd, all using class_name. tests/test_all.gd is green at its current check count and awaits one process_frame before running anything.",
+  "architecture": {
+    "decision": null,
+    "seams": [
+      "Publishers write to `_incoming`, never to `_active`. `RuntimeDirector` calls `swap()` at the top of its resolve and reads `_active`. Nothing else clears either buffer. This is the whole point of the row: a queue cleared on a schedule would wipe every input published during the idle frame, which is input LOSS, not latency.",
+      "Because publishing always targets `_incoming`, a commit that enqueues during resolution lands on the next tick and cannot mutate the array being iterated. Re-entrancy is structurally impossible rather than merely avoided — do not add any path that appends to `_active`.",
+      "`order` is a deterministic tie-breaker within one event type only. Gameplay precedence comes from Doc 00 §4.2 and nothing else; nothing may sort the queue by `order` across types.",
+      "One-frame latency is accepted and uniform. Anything published after the swap in frame N resolves in frame N+1. Do not add a second resolution pass to chase it.",
+      "RuntimeEvents has no _physics_process at all (Doc 00 §2.2)."
+    ],
+    "adr": null,
+    "note": "No architecture pre-pass. Doc 00 §2.5 gives both files' full source; there is no open design fork in this row."
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Add the RuntimeEvent record",
+      "trackerRow": "0.9",
+      "intent": "Create res://core/runtime_event.gd as `class_name RuntimeEvent extends RefCounted`, carrying Doc 00 §2.5's Type enum and the five fields every queued event holds: type, source, payload, physics_frame, order.",
+      "files": ["core/runtime_event.gd"],
+      "constraints": "Transcribe Doc 00 §2.5's enum exactly — all of it, in its authored order, with its section grouping preserved. Later rows resolve on these names and Doc 00 §4.2's priority ladder is written against them; a renamed or reordered member is a silent breakage. Use class_name, matching the convention every other core/ script already follows (Doc 01 §10: a script with no scene has a class_name and lives in core/). Add no methods — this is a record.",
+      "acceptance": "res://core/runtime_event.gd loads; RuntimeEvent.Type carries every member Doc 00 §2.5 lists; a new instance exposes type, source, payload, physics_frame and order.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": [],
+      "status": "done",
+      "result": "core/runtime_event.gd added with Doc 00 §2.5's full Type enum in authored order and the five record fields."
+    },
+    {
+      "id": "T2",
+      "title": "Add the RuntimeEvents double-buffered queue",
+      "trackerRow": "0.9",
+      "intent": "Create res://autoload/runtime_events.gd per Doc 00 §2.5 — _incoming for publishers, _active for the resolver, swap() called only by RuntimeDirector, plus enqueue(), defer(), take(), first() and has(). Register it in project.godot as autoload #5, directly after GameState, per Doc 00 §2.2's order.",
+      "files": ["autoload/runtime_events.gd", "project.godot"],
+      "constraints": "swap() moves _incoming into _active, replaces _incoming with a fresh array, and resets _order — it must never clear _active on any other schedule. enqueue() stamps physics_frame from Engine.get_physics_frames() and a monotonic order. The node has no _physics_process at all. Registration goes after GameState and before anything else; nothing else in project.godot changes. Two known hazards to handle rather than transcribe blindly: (a) Array.filter() returns an untyped Array, so returning it directly from a function typed Array[RuntimeEvent] fails at runtime — build the typed array explicitly; (b) Doc 00 §2.5's defer() uses push_front(), which inverts the relative order of two events deferred in the same resolve, contradicting §4.6's 'preserving order'. Preserve the order of successive defers within one tick, and record the deviation.",
+      "acceptance": "RuntimeEvents is registered as `*res://autoload/runtime_events.gd` after GameState; swap/enqueue/defer/take/first/has all behave per Doc 00 §2.5; take() returns a properly typed array; two events deferred in one resolve arrive next resolve in the order they were deferred.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T1"],
+      "status": "done",
+      "result": "autoload/runtime_events.gd added and registered fifth, after GameState. Both hazards handled: take() builds its typed array explicitly, and defer() inserts at a per-tick _deferred cursor reset by swap().",
+      "deviation": "Doc 00 §2.5's snippet was corrected in two places rather than transcribed, and the doc was amended to match so the two cannot drift. (a) defer() used push_front(), which inverts the relative order of two events deferred in one resolve — defer(A) then defer(B) arrived as [B, A], against §4.6's 'preserving order'. Observable the first time a checkpoint and a secret both fire behind one seamless activation. (b) take() returned Array.filter()'s result from a signature typed Array[RuntimeEvent]; filter() returns an untyped Array, so that fails at runtime rather than parse time."
+    },
+    {
+      "id": "T3",
+      "title": "Write Doc 00 §12 check 16 into the suite",
+      "trackerRow": "0.9",
+      "intent": "Append row 0.9's Verify column to res://tests/test_all.gd: an event published outside the physics pass survives to the next resolve and is seen exactly once. Enqueue with no intervening swap(), run two resolves, and assert the event was seen once and then not again — the regression test for the input-loss class Doc 00 §2.5 exists to prevent.",
+      "files": ["tests/test_all.gd"],
+      "constraints": "A --script SceneTree does not instantiate project autoloads, so the check must instantiate runtime_events.gd itself and add it to root, the same pattern row 0.6's check already uses. Assert the autoload registration separately. Cover, at minimum: an event enqueued before any swap is seen by exactly one of two consecutive resolves; an event enqueued DURING a resolve lands on the next one and does not mutate the array being read; defer() carries an event into the next resolve; two events deferred in one resolve keep their relative order; take() returns only the requested type and first()/has() agree with it. Do not weaken or reword any existing check.",
+      "acceptance": "'godot --headless --script res://tests/test_all.gd' exits 0 with the new checks green, and making swap() clear _active on a schedule — or making enqueue() write to _active — drives it nonzero.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T2"],
+      "status": "done",
+      "result": "Check 16 and its neighbours appended to tests/test_all.gd; suite green at 215 checks, no leaked instances. Two negative tests confirm the gate bites: publishing straight to _active fails 6 checks including 'seen exactly once: expected 1, got 0', and reverting defer() to push_front() fails both order checks.",
+      "finding": "Godot 4.7.1 exits 0 when `--script` fails to PARSE — it prints the parse error, runs nothing, and returns success. `--check-only` exits 0 as well. So the project's single quality gate cannot rest on the exit code alone: green means the run also printed 'test_all: N checks passed'. Recorded on tracker row 6.1, which owns the gate."
+    }
+  ]
+}

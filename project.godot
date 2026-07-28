@@ -19,6 +19,7 @@ Tokens="*res://autoload/tokens.gd"
 Weirdness="*res://autoload/weirdness.gd"
 Settings="*res://autoload/settings.gd"
 GameState="*res://autoload/game_state.gd"
+RuntimeEvents="*res://autoload/runtime_events.gd"
 
 [display]
 

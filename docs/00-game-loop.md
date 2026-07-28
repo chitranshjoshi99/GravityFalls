@@ -228,12 +228,14 @@ extends Node
 var _incoming: Array[RuntimeEvent] = []   ## publishers write here, any time
 var _active: Array[RuntimeEvent] = []     ## RuntimeDirector reads here, during resolve
 var _order := 0
+var _deferred := 0                        ## how many head entries defer() carried in
 
 ## Called by RuntimeDirector at the top of its resolve, and by nothing else.
 func swap() -> void:
 	_active = _incoming
 	_incoming = []
 	_order = 0
+	_deferred = 0
 
 func enqueue(type: RuntimeEvent.Type, source: Node, payload: Dictionary = {}) -> void:
 	var e := RuntimeEvent.new()
@@ -246,11 +248,25 @@ func enqueue(type: RuntimeEvent.Type, source: Node, payload: Dictionary = {}) ->
 	_incoming.append(e)
 
 ## Carry an event that lost its tick into the next resolve, preserving order (§4.6).
+##
+## `_deferred` counts what this tick has already carried, and is reset by swap().
+## A bare push_front() would put every deferred event at position zero, so
+## defer(A) then defer(B) would arrive as [B, A] — order inverted, which §4.6
+## forbids. It is observable the moment a checkpoint and a secret both fire
+## behind one seamless activation.
 func defer(e: RuntimeEvent) -> void:
-	_incoming.push_front(e)
+	_incoming.insert(_deferred, e)
+	_deferred += 1
 
+## Array.filter() returns an UNTYPED Array, which cannot be returned from a
+## function typed Array[RuntimeEvent] — it fails at runtime, not at parse time.
+## Build the typed array explicitly.
 func take(type: RuntimeEvent.Type) -> Array[RuntimeEvent]:
-	return _active.filter(func(e): return e.type == type)
+	var out: Array[RuntimeEvent] = []
+	for e in _active:
+		if e.type == type:
+			out.append(e)
+	return out
 
 func first(type: RuntimeEvent.Type) -> RuntimeEvent:
 	for e in _active:

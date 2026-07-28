@@ -21,6 +21,8 @@ const WeirdnessScript := preload("res://autoload/weirdness.gd")
 const SettingsScript := preload("res://autoload/settings.gd")
 const SaveDataResource := preload("res://core/save_data.gd")
 const GameStateScript := preload("res://autoload/game_state.gd")
+const RuntimeEventRecord := preload("res://core/runtime_event.gd")
+const RuntimeEventsScript := preload("res://autoload/runtime_events.gd")
 
 ## Doc 01 §10's tree, which is the single authority for every res:// path in
 ## the project. A directory not on this list is a finding: either the file
@@ -113,6 +115,7 @@ func _init() -> void:
 	_check_weirdness(h)             # tracker 0.6 / Doc 00 §12 check 36
 	_check_settings(h)              # tracker 0.7
 	_check_save_data(h)             # tracker 0.8 / Doc 00 §12 checks 32–33
+	_check_runtime_events(h)        # tracker 0.9 / Doc 00 §12 check 16
 
 	# --- (scene) checks -----------------------------------------------------
 	# Doc 00 §12's checks 1-3, 6, 14, 34, 35 and 39 need a real scene tree and
@@ -428,6 +431,105 @@ func _check_save_data(h) -> void:
 	state.free()
 	DirAccess.remove_absolute(slot)
 	DirAccess.remove_absolute(slot + ".tmp")
+
+
+## Tracker 0.9 / Doc 00 §12 check 16 — the input-loss regression test.
+##
+## Godot flushes input in the IDLE frame, so every E, J and pause press is
+## published OUTSIDE the physics pass. A queue cleared on a schedule would wipe
+## them; the double buffer means every event published between two resolves is
+## seen by exactly one resolve. "Exactly once" is both halves of the check: not
+## zero (lost) and not twice (replayed).
+func _check_runtime_events(h) -> void:
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/RuntimeEvents"),
+		"*res://autoload/runtime_events.gd",
+		"RuntimeEvents autoload registration"
+	)
+	var q: Node = RuntimeEventsScript.new()
+	# Doc 00 §2.2: this node is driven by RuntimeDirector, never self-ticking.
+	h.expect(not q.has_method("_physics_process"), "RuntimeEvents has no _physics_process")
+	root.add_child(q)
+
+	# --- check 16 proper: published with no intervening swap, seen exactly once.
+	q.enqueue(RuntimeEventRecord.Type.INTERACT_REQUEST, null)
+	var seen := 0
+	for _resolve in 2:
+		q.swap()
+		seen += q.take(RuntimeEventRecord.Type.INTERACT_REQUEST).size()
+	h.expect_eq(seen, 1, "an event published outside the physics pass is seen exactly once")
+
+	# The stamp survives the swap, so the resolver can tell how stale an event is.
+	q.enqueue(RuntimeEventRecord.Type.DAMAGE, null, {&"amount": 2})
+	q.swap()
+	var dmg: RuntimeEvent = q.first(RuntimeEventRecord.Type.DAMAGE)
+	h.expect(dmg != null, "first() finds the enqueued event")
+	if dmg != null:
+		h.expect_eq(dmg.payload.get(&"amount"), 2, "payload survives the swap")
+		h.expect_eq(dmg.source, NodePath(), "a null publisher leaves an empty source path")
+	h.expect(q.has(RuntimeEventRecord.Type.DAMAGE), "has() agrees with first()")
+	h.expect(
+		not q.has(RuntimeEventRecord.Type.ATTACK_REQUEST),
+		"has() is false for a type that was never published"
+	)
+	h.expect_eq(
+		q.take(RuntimeEventRecord.Type.ATTACK_REQUEST).size(), 0,
+		"take() returns only the requested type"
+	)
+
+	# --- publishing during a resolve lands on the NEXT one, and cannot mutate
+	#     the array being iterated. This is what makes re-entrancy structurally
+	#     impossible rather than merely avoided.
+	q.swap()
+	q.enqueue(RuntimeEventRecord.Type.CHECKPOINT_REACHED, null)
+	q.swap()
+	var active: Array[RuntimeEvent] = q.take(RuntimeEventRecord.Type.CHECKPOINT_REACHED)
+	var during: int = active.size()
+	q.enqueue(RuntimeEventRecord.Type.CHECKPOINT_REACHED, null)  # published mid-resolve
+	h.expect_eq(
+		q.take(RuntimeEventRecord.Type.CHECKPOINT_REACHED).size(), during,
+		"an event published during a resolve does not join the resolve in progress"
+	)
+	q.swap()
+	h.expect_eq(
+		q.take(RuntimeEventRecord.Type.CHECKPOINT_REACHED).size(), 1,
+		"an event published during a resolve lands on the next one"
+	)
+
+	# --- defer() carries a lost tick's event forward (§4.6) and keeps the order
+	#     the resolver saw. Doc 00 §2.5's bare push_front() reverses this pair.
+	q.swap()
+	var a := RuntimeEventRecord.new()
+	a.type = RuntimeEventRecord.Type.CHECKPOINT_REACHED
+	a.payload = {&"id": &"first"}
+	var b := RuntimeEventRecord.new()
+	b.type = RuntimeEventRecord.Type.CHECKPOINT_REACHED
+	b.payload = {&"id": &"second"}
+	q.defer(a)
+	q.defer(b)
+	q.swap()
+	var carried: Array[RuntimeEvent] = q.take(RuntimeEventRecord.Type.CHECKPOINT_REACHED)
+	h.expect_eq(carried.size(), 2, "both deferred events survive into the next resolve")
+	if carried.size() == 2:
+		h.expect_eq(carried[0].payload.get(&"id"), &"first", "defer preserves relative order")
+		h.expect_eq(carried[1].payload.get(&"id"), &"second", "defer preserves relative order")
+	q.swap()
+	h.expect_eq(
+		q.take(RuntimeEventRecord.Type.CHECKPOINT_REACHED).size(), 0,
+		"a deferred event is not carried a second time"
+	)
+
+	# --- order is monotonic within a tick and resets on swap.
+	q.enqueue(RuntimeEventRecord.Type.DODGE_REQUEST, null)
+	q.enqueue(RuntimeEventRecord.Type.DODGE_REQUEST, null)
+	q.swap()
+	var dodges: Array[RuntimeEvent] = q.take(RuntimeEventRecord.Type.DODGE_REQUEST)
+	h.expect_eq(dodges.size(), 2, "both same-type events survive one swap")
+	if dodges.size() == 2:
+		h.expect(dodges[0].order < dodges[1].order, "order is monotonic within a tick")
+		h.expect_eq(dodges[0].order, 0, "order resets on swap")
+
+	q.free()
 
 
 func _signed_area(points: PackedVector2Array) -> float:

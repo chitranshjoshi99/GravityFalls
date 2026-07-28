@@ -151,7 +151,7 @@ func set_rack_gain(g: float) -> void:
 
 ## 3. Zone crossfade
 
-Two racks, A and B. Doc 3's `ZoneManager.set_current()` already calls `AudioDirector.set_zone(def.bgm_id)`.
+Two racks, A and B. Doc 3's `ZoneManager.activate_zone()` (Doc 00 §7.2) already calls `AudioDirector.set_zone(def.bgm_id)` — and it is the only thing that does, for interiors as well as exteriors.
 
 ```gdscript
 # res://audio/audio_director.gd (excerpt)
@@ -581,11 +581,11 @@ func _init() -> void:
 	assert(StemRack.to_db(0.0) <= -80.0, "zero gain must be silent")
 
 	# --- Cue lengths must match the animations they cover -----------------
-	assert(is_equal_approx(Sfx.length(&"journal_open"), 0.42),
+	assert(is_equal_approx(AudioDirector.sfx_length(&"journal_open"), 0.42),
 		"journal_open must match Doc 2 OPEN_TIME")
-	assert(is_equal_approx(Sfx.length(&"journal_close"), 0.30),
+	assert(is_equal_approx(AudioDirector.sfx_length(&"journal_close"), 0.30),
 		"journal_close must match Doc 2 CLOSE_TIME")
-	assert(is_equal_approx(Sfx.length(&"journal_scan_loop"), 1.40),
+	assert(is_equal_approx(AudioDirector.sfx_length(&"journal_scan_loop"), 1.40),
 		"scan loop must match Doc 2 SCAN_DURATION")
 
 	# --- Bar maths ---------------------------------------------------------

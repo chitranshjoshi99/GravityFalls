@@ -1,0 +1,1048 @@
+# DOCUMENT 00 — Game Loop, Runtime Events & Session Lifecycle
+
+**Consumes:** `foundation.md`, Documents 1–5
+**Feeds:** Documents 6–25 (every chapter)
+**Purpose:** The implementation contract for Godot 4.x / GDScript. This document defines *when* systems run, which system owns each transition, what wins when several things happen in the same physics tick, and how a session begins, persists, fails, and ends.
+
+This is the foundational runtime document. Where it conflicts with Documents 1–5, this document wins — §0.2 names every specific override rather than claiming a blanket one.
+
+---
+
+## 0. How to read this document
+
+### 0.1 References, not restatements
+
+Tuning constants live in exactly one document each. Doc 00 references them and never copies them, because a duplicated constant is a constant that will drift.
+
+| Value | Owner | Doc 00 uses it in |
+|---|---|---|
+| Journal speed, walk/run/sneak speeds | Doc 2 §3.1 | §5 state table |
+| `OPEN_TIME` 0.42 / `CLOSE_TIME` 0.30 / `FUMBLE_DURATION` 0.80 | Doc 2 §5.1 | §5.2 Journal machine |
+| `IFRAME_DURATION` 0.90, health pips, knockback | Doc 2 §7.1 | §4.3 hit resolution |
+| `SCAN_DURATION` 1.40, range, cone | Doc 2 §5.4 | §6.4 scan cancellation |
+| Dodge impulse, i-frame window, stamina cost | Doc 2 §3.4 | §4.3 |
+| `DEPTH_RATIO` 0.62 | Doc 2 §12.1 | anything positional |
+| `CELL`, `STREAM_MARGIN`, `UNLOAD_MARGIN`, `SEAM_BLOCK_GRACE` | Doc 3 §3.2 | §7 zone travel |
+| Zone grid, adjacency, `seam_chapter`, `unlock_chapter` | Doc 3 §1 | §7, §9 |
+| `ZONE_CROSSFADE` 2.5 s, ducking table | Doc 5 §3, §8 | §7.3, §7.4 |
+| `Weirdness` API (`set_zone_floor`, `pulse`, `release`) | Doc 1 §2.1 | §7.3 |
+| HUD fade timings, dialogue mode rules | Doc 4 §2.7, §3.2 | §11 |
+
+If a number appears in this document without a citation, this document owns it.
+
+### 0.2 Named supersessions
+
+Docs 1–5 contain illustrative snippets that mutate state directly from Godot callbacks. Those snippets are superseded here. The *design intent* of each is preserved exactly; only the call path changes.
+
+| Superseded | Replaced by | Nature of change |
+|---|---|---|
+| Doc 2 §3.3 `PlayerController.State` (6 states) | §5.1 (10 states) | Adds `ATTACKING`, `DRIVING`, `ZONE_TRANSITION`, `BLACKOUT` |
+| Doc 2 §5.2 `Journal.on_owner_damaged()` timer | §5.2, §2.4 | `create_timer` → resolver-counted ticks |
+| Doc 2 §7.1 `Health.take_damage()` i-frame timer | §2.4 | Same |
+| Doc 2 §8 `Interactor._unhandled_input()` direct `interact()` | §6.1 | Direct call → `INTERACT_REQUEST` |
+| Doc 3 §3.1 `ZoneBoundary._on_entered()` direct `gated_transition()` | §7.5 | Direct call → `GATED_ZONE_REQUEST` |
+| Doc 3 §3.2 `ZoneManager.set_current()` | §7.2 `activate_zone()` | Renamed; single commit path |
+| Doc 3 §8 `DoorTransition`, "no zone-manager involvement" | §7.6 | Interiors are `ZoneDef`s with streaming disabled |
+| Doc 4 §3.1 `DialogueLine.pause_player` | §8.3 | Field removed; author a `CUTSCENE_REQUEST` |
+| Docs 2 §5.2 / 3 §6 `SfxBus.play()` | §2.3 | Name corrected to `AudioDirector.play_sfx()` |
+| Doc 4 §2.7 `BossDirector.active` | §2.3 | Folded into `CombatDirector.boss_active` |
+
+Doc 1 is not superseded anywhere. Its tokens, rigs, and `Weirdness` autoload stand as written.
+
+---
+
+## 1. Player-facing loop
+
+```text
+Explore → notice threat, anomaly, clue, or blocked path
+→ investigate with the Journal, UV light, scan, or an item
+→ learn a weakness / reveal a secret / solve a route
+→ survive the consequence and gain knowledge, access, or story progress
+→ enter the next space and repeat
+```
+
+The Journal is deliberately part of the live loop, not a safe pause screen. Knowledge creates advantage, but obtaining it costs time, movement speed, and attention. Doc 2 §12.6's "the world never pauses" is the rule that makes this real, and §10 of this document is the only exception to it.
+
+---
+
+## 2. Architecture
+
+### 2.1 Ownership and signal direction
+
+No gameplay system calls another system's state setter from an `Area2D.body_entered`, `area_entered`, or hitbox callback. Those callbacks only publish facts.
+
+```text
+Godot callbacks / input / animation call tracks
+                    ↓
+            RuntimeEvents.enqueue()
+                    ↓
+      RuntimeDirector resolves one tick
+                    ↓
+ PlayerController / Journal / ZoneManager commit state
+                    ↓
+     UI, Audio, VFX, dialogue react to committed signals
+```
+
+### 2.2 Autoloads, in registration order
+
+Registration order is load-bearing: an autoload may only reference autoloads registered above it during `_ready()`.
+
+| # | Autoload | `process_physics_priority` | Owns |
+|---:|---|---:|---|
+| 1 | `Tokens` | — | Doc 1 constants, expression presets |
+| 2 | `Weirdness` | — | Doc 1 §2.1. Single supernatural-intensity float |
+| 3 | `Settings` | — | Doc 4 §5.1 accessibility + Doc 4 §7.3 options. Own file, never in a save |
+| 4 | `GameState` | — | §9. Persistent chapter, flags, inventory, entries, checkpoints, save I/O |
+| 5 | `RuntimeEvents` | — | §2.5. Double-buffered event queue. Has no `_physics_process` at all |
+| 6 | `AudioDirector` | — | Doc 5. BGM racks, crossfade, buses, SFX |
+| 7 | `CombatDirector` | 50 | §2.3. Aggro set, `threat_active`, boss phase |
+| 8 | `CutsceneDirector` | — | §8. Queued/active cutscenes, `CUTSCENE` ownership |
+| 9 | `TransitionDirector` | — | §7.4. Overlay fades, gated-travel coroutine |
+| 10 | `ZoneManager` | 110 | Doc 3 §3.2 + §7.2. Residency, `activate_zone()`, streaming |
+| 11 | `SessionDirector` | — | §3. Boot, world root, player instancing, session begin/end |
+| 12 | `RuntimeDirector` | **100** | §4. Priority resolution and cross-system sequencing |
+
+**The priority numbers are not decoration.** Godot adds autoloads as root's first children, so by default they `_physics_process()` *before* the scene tree — the exact opposite of what §4's frame contract requires. `RuntimeDirector` must run after every body has moved and every trigger has published. Pin these values in each script's `_ready()`:
+
+```gdscript
+func _ready() -> void:
+    process_physics_priority = 100      # after all gameplay nodes (default 0)
+```
+
+`ZoneManager` streams at 110 so residency changes land after the tick's state is committed, never mid-resolution.
+
+### 2.3 `CombatDirector`
+
+Doc 4 §2.7 and §3.2 both read combat state that no document defined. It lives here.
+
+```gdscript
+# res://runtime/combat_director.gd — Autoload "CombatDirector"
+extends Node
+
+signal threat_changed(active: bool)
+signal boss_phase_changed(boss_id: StringName, phase: int)
+
+const THREAT_LINGER := 4.0          ## matches Doc 4's HUD idle-hide delay
+
+var threat_active: bool = false      ## Doc 4 §2.7, §3.2 read this
+var boss_active: bool = false        ## replaces Doc 4's BossDirector.active
+var boss_id: StringName = &""
+var boss_phase: int = 0              ## Doc 5 §4.2 gates boss_bill stems on this
+
+var _aggro: Dictionary = {}          # enemy instance id -> ticks since last aggro
+```
+
+An enemy registers on aggro and deregisters on death or de-aggro. `threat_active` is true while `_aggro` is non-empty, and stays true for `THREAT_LINGER` after it empties — so the HUD does not blink off between waves and Doc 4 §3.2 does not flip a mid-fight line back to a box.
+
+`boss_phase` is the sole input to Doc 5 §4.2's stem gating. Chapter docs advance it; they never touch `AudioDirector` stems directly.
+
+### 2.4 No `SceneTree` timers for gameplay state
+
+Doc 2 §5.2 and §7.1 use `get_tree().create_timer(...).timeout.connect(...)`. That pattern breaks three ways: it mutates state outside the resolver, it does not survive §10's pause predictably, and it cannot be stepped by §12's headless tests.
+
+**Every gameplay duration is counted in physics ticks by the system that owns it, decremented in its resolver-invoked `tick()`.** Presentation-only timers (a tween on a HUD element, a shader fade) may still use tweens freely.
+
+```gdscript
+const TICK := 1.0 / 60.0
+const FUMBLE_TICKS := int(round(Journal.FUMBLE_DURATION / TICK))   # Doc 2 §5.1 → 48
+```
+
+Durations are always derived from the owning document's float constant, never re-entered as an integer literal.
+
+### 2.5 Event record
+
+```gdscript
+# res://runtime/runtime_event.gd
+class_name RuntimeEvent
+extends RefCounted
+
+enum Type {
+	# --- lifecycle & travel ------------------------------------------------
+	ZONE_ACTIVATION_REQUEST,   # seamless: activation volume crossed
+	GATED_ZONE_REQUEST,        # gated: boundary entered, fade required
+	SEAM_FALLBACK_REQUEST,     # Doc 3 §3.3 grace wipe — loader lost the race
+	RESPAWN_REQUEST,           # blackout complete, return at checkpoint
+	CHAPTER_ADVANCE_REQUEST,   # §9.4
+
+	# --- forced ------------------------------------------------------------
+	LETHAL_DAMAGE,
+	DAMAGE,
+	CUTSCENE_REQUEST,
+
+	# --- player intents ----------------------------------------------------
+	PAUSE_REQUEST,
+	DODGE_REQUEST,
+	VEHICLE_BOARD_REQUEST,
+	VEHICLE_EXIT_REQUEST,
+	ATTACK_REQUEST,
+	ITEM_USE_REQUEST,
+	ITEM_SELECT_REQUEST,       # radial commit, Doc 4 §6.3
+	JOURNAL_TOGGLE_REQUEST,
+	UV_TOGGLE_REQUEST,
+	INTERACT_REQUEST,
+
+	# --- passive progression -----------------------------------------------
+	CHECKPOINT_REACHED,
+	SECRET_REVEAL_REQUEST,
+	ANOMALY_ENTERED,
+	ANOMALY_EXITED,
+}
+
+var type: Type
+var source: NodePath
+var payload: Dictionary
+var physics_frame: int
+var order: int                 # monotonic queue order within this physics tick
+```
+
+**The queue is double-buffered, and it is never cleared on a schedule.** Publishers write to
+`_incoming`. `RuntimeDirector` swaps the buffers at the start of its own resolve and reads
+`_active`. Nothing else clears either one.
+
+This is not a style choice. Godot dispatches `_input` / `_unhandled_input` during the input
+flush, which — with default (non-agile) event flushing — happens in the *idle* frame, not
+inside the physics pass. A queue cleared at physics priority −100 would therefore wipe every
+`E`, `J`, and pause press published since the previous physics tick. **Input loss, not input
+latency.** A swap has no such window: every event published between two resolves is seen by
+exactly one resolve.
+
+```gdscript
+# res://runtime/runtime_events.gd — Autoload "RuntimeEvents"
+extends Node
+
+var _incoming: Array[RuntimeEvent] = []   ## publishers write here, any time
+var _active: Array[RuntimeEvent] = []     ## RuntimeDirector reads here, during resolve
+var _order := 0
+
+## Called by RuntimeDirector at the top of its resolve, and by nothing else.
+func swap() -> void:
+	_active = _incoming
+	_incoming = []
+	_order = 0
+
+func enqueue(type: RuntimeEvent.Type, source: Node, payload: Dictionary = {}) -> void:
+	var e := RuntimeEvent.new()
+	e.type = type
+	e.source = source.get_path() if source else NodePath()
+	e.payload = payload
+	e.physics_frame = Engine.get_physics_frames()
+	e.order = _order
+	_order += 1
+	_incoming.append(e)
+
+## Carry an event that lost its tick into the next resolve, preserving order (§4.6).
+func defer(e: RuntimeEvent) -> void:
+	_incoming.push_front(e)
+
+func take(type: RuntimeEvent.Type) -> Array[RuntimeEvent]:
+	return _active.filter(func(e): return e.type == type)
+
+func first(type: RuntimeEvent.Type) -> RuntimeEvent:
+	for e in _active:
+		if e.type == type:
+			return e
+	return null
+
+func has(type: RuntimeEvent.Type) -> bool:
+	return first(type) != null
+```
+
+`order` is a deterministic tie-breaker within one type only. Gameplay precedence comes from §4.2 and nothing else.
+
+Because publishing always targets `_incoming`, a commit that enqueues during resolution — a
+respawn queuing its wake-line cutscene, say — lands on the *next* tick and cannot mutate the
+array being iterated. Re-entrancy is structurally impossible rather than merely avoided.
+
+**One-frame latency is accepted and uniform.** Anything published after `RuntimeDirector` has swapped in frame *N* resolves in frame *N+1*. This is deterministic, applies to every system equally, and is invisible at 60 Hz. Do not add a second resolution pass to chase it.
+
+---
+
+## 3. Boot & session lifecycle
+
+Nothing in Docs 1–5 mounts the first zone or creates the player. `SessionDirector` does.
+
+### 3.1 Boot sequence
+
+```text
+1. Autoloads _ready() in §2.2 order. No gameplay nodes exist yet.
+2. AudioDirector bakes procedural placeholders (Doc 5 §7.1). Blocking, <1 s.
+3. Settings.load() from user://settings.cfg. Applied before any UI draws.
+4. Main menu scene (Doc 4 §7.1). AudioDirector.set_zone(&"bgm_menu").
+   "Continue" is hidden unless GameState.has_save().
+5. New Game  → GameState.new_game()
+   Continue  → GameState.load_slot(0); on parse failure, warn and fall back to (4)
+   Chapters  → §9.5 scratch session
+6. SessionDirector.begin_session()
+7. Control returns to the player, and §7.7's arrival grace applies.
+```
+
+### 3.2 `begin_session()`
+
+```gdscript
+# res://runtime/session_director.gd — Autoload "SessionDirector"
+extends Node
+
+const PLAYER_SCENE := preload("res://actors/dipper.tscn")
+const WORLD_SCENE := preload("res://world/world_root.tscn")
+
+var world_root: Node2D
+var player: PlayerController
+
+func begin_session() -> void:
+	# 1. World root: owns the §Doc 3 §2.3 parallax and hosts every zone instance.
+	world_root = WORLD_SCENE.instantiate()
+	get_tree().root.add_child(world_root)
+
+	# 2. Player exists before any zone does, so triggers never fire into a null.
+	player = PLAYER_SCENE.instantiate()
+	player.state = PlayerController.State.ZONE_TRANSITION   # locked until mounted
+	world_root.get_node(^"Actors").add_child(player)
+
+	# 3. Wire the systems that Doc 3 §3.2 left unassigned.
+	ZoneManager.bind(world_root, player)
+	RuntimeDirector.bind(player)
+	CombatDirector.reset()
+
+	# 4. Mount behind an already-opaque overlay — no fade-out, we start black.
+	var cp := GameState.checkpoint
+	TransitionDirector.set_opaque(true)
+	await ZoneManager.mount_initial(cp.zone_id, cp.position)
+	# activate_zone() has now committed palette, weirdness floor, and BGM.
+
+	# 5. Hand the lock to the resolver. It counts the fade in ticks and releases
+	#    the player itself; the tween only mirrors it (§4.5). Boot does not await
+	#    an animation to decide when gameplay starts.
+	RuntimeDirector.take_lock(RuntimeDirector.FADE_TICKS)
+	TransitionDirector.play_fade_in(RuntimeDirector.FADE_TICKS)
+```
+
+The player is instantiated **before** the first zone so that destination `Area2D`s at the spawn marker overlap a body that already exists. Reversing this is the classic first-frame null.
+
+`_lock_ticks` reaching zero is what returns control and starts §7.7's arrival grace — the same path a gated transition and a respawn take, so boot is not a special case with its own release rule. The `await` on `mount_initial()` is legitimate: it waits on `ResourceLoader`, which is genuinely asynchronous, not on a tween.
+
+### 3.3 `end_session()`
+
+Quit to Menu, or the credits. Flush a save (§9.3), free `world_root`, `CombatDirector.reset()`, `Weirdness.set_zone_floor(0.0)`, `AudioDirector.set_zone(&"bgm_menu")`, then load the menu scene. `RuntimeEvents` is cleared. No gameplay autoload holds a reference to a freed node afterward — §12 check 12 proves it.
+
+---
+
+## 4. One physics-tick contract
+
+### 4.1 The frame
+
+`RuntimeDirector._physics_process()` at priority 100 owns the contract below. Input may be sampled earlier in the frame, but it remains an intent until this resolver commits it.
+
+```text
+1. Input handlers publish intents          (idle frame or physics — either is safe)
+2. AI, animation call tracks, movement, physics bodies advance
+3. Passive trigger volumes publish facts   (Area2D signals)
+4. RuntimeDirector, priority 100:
+   a. RuntimeEvents.swap() — everything published since the last resolve
+   b. poll hitbox overlaps directly (§4.3)
+   c. tick owned durations: i-frames, fumble, dodge, attack, grace, lock (§2.4)
+   d. resolve by §4.2 priority
+   e. commit state and emit committed-domain signals
+   f. defer any unresolved event that §4.6 says survives
+5. ZoneManager streams/culls               (priority 110)
+6. _process(): UI, audio, camera, VFX, dialogue react to committed signals
+```
+
+Step 1 has no ordering requirement, which is the point of §2.5's swap. Input is free to arrive in the idle frame; it will still be seen by exactly one resolve.
+
+Step 4b matters. Combat overlap is **polled**, not signal-driven, because signal arrival order relative to the resolver is not a guarantee Godot makes. `get_overlapping_areas()` at priority 100 is: it reflects the state of the world after everything moved this tick. §4.3's whole rule depends on it.
+
+```gdscript
+# res://runtime/runtime_director.gd — Autoload "RuntimeDirector" (skeleton)
+extends Node
+
+var player: PlayerController
+var _pending_blackout := false
+var _lock_ticks := 0                    ## > 0 means a transition owns the frame (§4.5)
+var _arrival_grace_ticks := 0
+
+func _ready() -> void:
+	process_physics_priority = 100
+
+func _physics_process(_delta: float) -> void:
+	if player == null:
+		return
+	RuntimeEvents.swap()
+	_poll_contacts()
+	_tick_durations()                   # decrements _lock_ticks among others
+	_resolve()
+
+func _resolve() -> void:
+	# Priority 0 — an in-flight transition or a blackout owns the frame.
+	if _lock_ticks > 0 or player.state == PlayerController.State.BLACKOUT:
+		_resolve_locked()
+		return
+
+	if _try_respawn():        return    # 1
+	_try_zone_travel()                  # 2  — see below; seamless does NOT end the tick
+	if _try_lethal():         return    # 3
+	_try_damage()                       # 4  — cancels lower intents, does not skip them
+	if _try_pause():          return    # 5
+	if _try_cutscene():       return    # 6
+	if _try_dodge():          return    # 7
+	if _try_vehicle():        return    # 8
+	if _try_attack():         return    # 9
+	if _try_item_use():       return    # 10
+	if _try_journal():        return    # 11
+	if _try_journal_domain(): return    # 12  — UV toggle, radial commit
+	_try_interact()                     # 13
+	_try_passive()                      # 14
+	_try_chapter_advance()              # 15  — always last
+
+## Priority 0. The only events that may pass while locked.
+func _resolve_locked() -> void:
+	# Respawn is reachable ONLY here: BLACKOUT is itself a locked state, so
+	# priority 1 in _resolve() would otherwise be dead code.
+	if RuntimeEvents.has(RuntimeEvent.Type.RESPAWN_REQUEST):
+		_try_respawn()
+		return
+	# A gated transition ending is the lock's own completion, not an event.
+	# Everything else published this tick is discarded by design (§6.3): no
+	# checkpoint, secret, anomaly, or input may commit behind an opaque overlay.
+	_discard_locked_events()
+```
+
+Each `_try_*` returns `true` only if it committed. A committed higher priority ends the tick for every *intent* below it. Two deliberate exceptions:
+
+- `_try_damage()` applies and then cancels lower intents rather than skipping them silently.
+- `_try_zone_travel()` never ends the tick on a **seamless** activation, for the reason in §4.5.
+
+### 4.2 Resolution priority
+
+| Priority | Event | Result |
+|---:|---|---|
+| **0** | Active transition lock / `BLACKOUT` | Gate, not an event. All gameplay input is dropped. Passive triggers are suppressed (§6.3). Only the owning director's own completion may pass. |
+| 1 | `RESPAWN_REQUEST` | Blackout is complete. Commits §11.2's respawn, which may itself be a zone travel. |
+| 2 | `GATED_ZONE_REQUEST` · `SEAM_FALLBACK_REQUEST` | Validated and committed **before** damage. **Takes the transition lock** and ends the tick. A same-tick lethal hit is deferred to the destination (§7.8). |
+| 2 | `ZONE_ACTIVATION_REQUEST` (seamless) | Validated and committed **before** damage, and takes **no** lock — resolution continues down this table. §4.5. A same-tick lethal hit is still deferred (§7.8). |
+| 3 | `LETHAL_DAMAGE` | Starts blackout, unless a zone request committed at priority 2. |
+| 4 | `DAMAGE` | Cancels interaction, Journal scan/open, attack, and dodge requests not already protected by active i-frames. |
+| 5 | `PAUSE_REQUEST` | §10. Dropped, never queued, if state forbids it. |
+| 6 | `CUTSCENE_REQUEST` | Begins only after damage has resolved. A pending Journal first closes under §5.2. |
+| 7 | `DODGE_REQUEST` | Begins only if no hit connected this tick. |
+| 8 | `VEHICLE_BOARD_REQUEST` · `VEHICLE_EXIT_REQUEST` | §5.3. Requires `FREE` / `DRIVING` respectively, and zero velocity to exit. |
+| 9 | `ATTACK_REQUEST` | Requires `FREE`. Enters `ATTACKING` for Doc 2 §4's windup+active+recovery. |
+| 10 | `ITEM_USE_REQUEST` | Requires `FREE`, `JOURNAL`, or `DRIVING` (horn, thrown item). |
+| 11 | `JOURNAL_TOGGLE_REQUEST` | Opens/closes only in a permitted player state (§5.2). |
+| 12 | `UV_TOGGLE_REQUEST` · `ITEM_SELECT_REQUEST` | Journal-domain intents. Require `JOURNAL` (UV) or `FREE`/`JOURNAL` (radial). |
+| 13 | `INTERACT_REQUEST` | Calls an interactable only while Player state is `FREE` and no higher-priority event won. |
+| 14 | `CHECKPOINT_REACHED` · `SECRET_REVEAL_REQUEST` · `ANOMALY_ENTERED/EXITED` | Commit only when trigger processing is armed (§6.3). |
+| 15 | `CHAPTER_ADVANCE_REQUEST` | Always last, so a chapter advance never lands mid-resolution and never changes a gate another `_try_*` already read this tick. |
+
+**Scan is not an event.** Doc 2 §5.4 polls `Input.is_action_pressed("scan")` continuously and requires `PlayerController.State.JOURNAL`. That poll stays — it is a *continuous* intent, not a discrete one, and the resolver governs it by owning the `JOURNAL` state it depends on. Damage, dodge, cutscene, and zone travel all cancel an in-progress scan through §5.2's cancellation rule.
+
+### 4.3 "The hit arrived first"
+
+Combat overlaps are polled at step 5a, before any intent is committed. Therefore an enemy hitbox already overlapping Dipper in that physics tick wins and deals damage. If the dodge was committed in an earlier tick and its i-frame window (Doc 2 §3.4) is active when the hit resolves, the hit is ignored.
+
+**A hit wins if it arrived first; an already-active dodge protects.** Animation call tracks remain the source of truth for hitbox activation and i-frame timing (Doc 2 §4.1).
+
+Multiple damage sources in one tick resolve as one hit. Doc 2 §7.1's i-frame flag is set on the first commit, so the second is dropped in the same tick rather than stacking — the resolver relies on this rather than deduplicating separately.
+
+### 4.4 Same-tick examples
+
+| Facts collected this tick | Resolution |
+|---|---|
+| `E` pressed + non-lethal hit | Damage applies; interaction is cancelled. |
+| Story trigger + non-lethal hit | Damage applies first; cutscene begins on the next eligible tick. |
+| Zone activation threshold + lethal hit | Zone transition commits; blackout is deferred until arrival. |
+| Dodge input + already-active enemy hitbox | Damage applies; dodge does not begin. |
+| Checkpoint + secret + anomaly, while transition locked | All three remain suppressed; none fire. |
+| Attack input + `J` pressed | Attack wins (priority 9 over 11); the Journal does not open. |
+| Pause + lethal damage | Damage resolves first; blackout starts; the pause request is dropped, not queued (§10). |
+| Chapter advance + zone activation | Zone commits at priority 2; the advance lands at 15, after `current_zone` is already the destination. |
+| Boundary crossed while driving | Vehicle crosses with the player (§5.3); the Journal was already blocked. |
+
+---
+
+### 4.5 The transition lock
+
+Only **gated** travel takes the lock. This is the single most load-bearing distinction in the resolver, and §4.2's table states it per row.
+
+| Travel | Lock | Player state | Rest of the tick |
+|---|---|---|---|
+| `ZONE_ACTIVATION_REQUEST` (seamless, §7.3) | **No** | stays `FREE` / `DRIVING` | Continues normally — damage, intents, and passive events all still resolve |
+| `GATED_ZONE_REQUEST` (§7.4) | Yes | `ZONE_TRANSITION` | Ends. Lower priorities are discarded by §6.3 |
+| `SEAM_FALLBACK_REQUEST` (§7.4) | Yes | `ZONE_TRANSITION` | Ends |
+| `RESPAWN_REQUEST` crossing a zone (§11.2) | Yes | `BLACKOUT` → `ZONE_TRANSITION` | Ends |
+
+A seamless crossing is not a transition. It removes no control, plays no fade, and takes no lock — so it must not behave like one in the resolver either. A player who walks across a seam and into an enemy hitbox on the same tick takes the hit; a seam is not a shield.
+
+**The lock is a tick countdown, never a tween.** `_lock_ticks` is set from the owning sequence's duration and decremented in `_tick_durations()`. The overlay tween *mirrors* it visually and has no authority over gameplay state — §2.4's rule applied to the one place it most matters:
+
+```gdscript
+const FADE_TICKS      := 21   # 0.35 s — §7.4
+const DOOR_WIPE_TICKS := 15   # 0.25 s — §7.6
+const SEAM_WIPE_TICKS := 7    # 0.12 s — §7.4 fallback
+
+func begin_gated_transition(to: StringName, marker: StringName) -> void:
+	_lock_ticks = FADE_TICKS * 2 + _mount_budget_ticks(to)
+	player.state = PlayerController.State.ZONE_TRANSITION
+	TransitionDirector.play_fade(FADE_TICKS)      # presentation only
+```
+
+If the mount finishes early the lock is truncated to the remaining fade; if it overruns, the lock extends and the overlay simply holds opaque. Gameplay never resumes because an animation finished — it resumes because the resolver says so.
+
+### 4.6 What survives a lost tick
+
+An event that did not commit is discarded, with three exceptions that are explicitly deferred to the next resolve via `RuntimeEvents.defer()`:
+
+| Event | Why it is deferred rather than dropped |
+|---|---|
+| `CUTSCENE_REQUEST` | §8.1 requires it to survive a same-tick hit and a Journal close. Already stated as "remains pending". |
+| `CHECKPOINT_REACHED` · `SECRET_REVEAL_REQUEST` published during a **seamless** activation | The destination trigger fired legitimately; nothing was suppressed. See below. |
+| `CHAPTER_ADVANCE_REQUEST` | Never dropped. If something outranked it, it lands next tick. |
+
+Everything else — input intents, anomaly enter/exit, damage — is discarded and re-detected. That is correct for continuous facts: an anomaly the player is still standing in re-publishes next tick anyway, and a dropped `E` costs 16 ms.
+
+**Why passive events need this rule at all.** `Area2D.body_entered` fires exactly once. If a checkpoint in the destination zone fires on the same tick the player crosses a seam, and the resolver drops it, that checkpoint is lost until the player physically leaves and re-enters it. §4.5's "seamless does not end the tick" already prevents this for the common case; `defer()` covers the ordering edge where the trigger published *after* the resolver swapped.
+
+For **gated** travel the opposite rule applies, and it is not a leak: destination triggers overlapping Dipper at the spawn marker are suppressed by §6.3 on purpose. Because they already fired their one `body_entered` behind the overlay, arming cannot rely on a signal that has been and gone — so on transition completion `ZoneManager` **polls** `get_overlapping_bodies()` on every armed trigger in the destination and publishes for whatever is genuinely overlapping. §6.3 says "queued as dormant"; this is the concrete mechanism.
+
+---
+
+## 5. Player states
+
+### 5.1 The enum
+
+Extends Doc 2 §3.3 — that enum's six states keep their exact meaning; four are added.
+
+```gdscript
+enum State {
+	FREE,
+	JOURNAL,
+	ATTACKING,          # new — Doc 2 §4 gives the timings, no state owned them
+	DODGING,
+	HURT,
+	FUMBLING,
+	DRIVING,            # new — Doc 3 §7 cart, §5.3 boat
+	CUTSCENE,
+	ZONE_TRANSITION,    # new
+	BLACKOUT,           # new
+}
+```
+
+| State | Movement | Input accepted | Allowed exits |
+|---|---|---|---|
+| `FREE` | Doc 2 §3.1 | All normal intents | Journal, attack, dodge, vehicle, hurt, cutscene, zone transition, blackout, pause |
+| `JOURNAL` | Doc 2 §3.1 journal speed | Movement, Journal, scan, UV, item, radial | Close, fumble, dodge, cutscene-close, blackout, pause |
+| `ATTACKING` | Drifts, no steering | None | `FREE` on recovery end, `HURT`, `BLACKOUT` |
+| `DODGING` | Doc 2 §3.4 impulse | None | `FREE`, `HURT` |
+| `HURT` | Knockback only | None | `FREE`, `BLACKOUT`, deferred cutscene |
+| `FUMBLING` | None | None | `FREE` after Journal returns `CLOSED` |
+| `DRIVING` | Doc 3 §7 vehicle handling | Vehicle controls, item use, interact, pause | `FREE` on exit, `ZONE_TRANSITION`, `CUTSCENE`, `BLACKOUT` |
+| `CUTSCENE` | None | Skip only if the chapter allows it | `FREE`, `BLACKOUT` |
+| `ZONE_TRANSITION` | None | None | `FREE`, deferred `BLACKOUT` |
+| `BLACKOUT` | None | None | `RESPAWN_REQUEST` → `FREE` |
+
+Pause is **not** a state. It is `get_tree().paused`, orthogonal to this enum, governed by §10.
+
+### 5.2 Journal state machine
+
+```text
+CLOSED --J--> OPENING --0.42 s--> OPEN --J--> CLOSING --0.30 s--> CLOSED
+   ^                         |                     |
+   |                         +--damage------------+
+   +--------------------- FUMBLED --0.80 s --------+
+                             |
+                 dodge → immediate forced close
+```
+
+Durations are Doc 2 §5.1's, counted in ticks per §2.4.
+
+| Cause | Required outcome |
+|---|---|
+| Damage in `OPENING` or `OPEN` | Cancel scan, Journal `FUMBLED`, Player `FUMBLING`, then both return to normal closed/free state. |
+| Dodge in `OPENING` or `OPEN` | Cancel scan and force Journal `CLOSED` in the same tick; play the established dropped-book dive presentation, then Player enters `DODGING`. This is not the 0.80 s damage fumble. |
+| Cutscene request in `OPENING` or `OPEN` | Cancel scan, complete the normal close, then `CutsceneDirector` acquires Player state. |
+| Zone boundary while Journal is not closed | Boundary blocker denies travel; no state changes occur (§7.5). |
+| Vehicle board request while Journal is not closed | Denied, same affordance as the boundary blocker. |
+| Blackout | Journal closes without a player-visible reopen state; respawn is always `CLOSED`. |
+| Pause | Journal state is frozen, not closed. Unpausing resumes mid-`OPENING` if that is where it was. |
+
+`Journal.blocks_zone_travel()` returns true for `OPENING`, `OPEN`, `CLOSING`, and `FUMBLED`. It is false only in `CLOSED`.
+
+`J` from `OPEN` starts the normal close. It is ignored during `OPENING`, `CLOSING`, `FUMBLED`, `ATTACKING`, `DRIVING`, `CUTSCENE`, `ZONE_TRANSITION`, and `BLACKOUT`.
+
+### 5.3 Vehicles
+
+The cart is a **possessed body**, not a mount. Doc 3 §7 owns its handling; this document owns the ownership transfer.
+
+```text
+Board  (priority 8, requires FREE, Journal CLOSED, within interact range):
+  1. Player state → DRIVING.
+  2. PlayerController collision + visual disabled; the body persists as the
+     save/checkpoint anchor and follows the vehicle's transform each tick.
+  3. Camera target → vehicle. Interactor disabled.
+  4. Companion auto-boards (Doc 3 §7) — its follower is suspended, not freed.
+  5. AudioDirector starts the Doc 5 §5.2 engine layers.
+
+Exit   (priority 8, requires DRIVING and |speed| < 20 px/s):
+  Reverse, placing Dipper at the vehicle's dismount marker on walkable ground.
+```
+
+While `DRIVING`: Journal is blocked, dodge and attack are rejected, item use is allowed (horn, thrown items), interact is allowed only for vehicle-flagged targets. Damage transfers to the player's `Health` normally and knockback applies to the vehicle. Lethal damage while driving forces an exit at the vehicle's position, then blackout.
+
+**Vehicles cross zone boundaries.** Doc 3 sizes the world around an 18 s cart trip from Shack to Town, so a cart that cannot cross a seam is pointless. Both §7.3 and §7.4 sequences apply unchanged; the vehicle is placed at the destination's spawn marker with the player, and §7.7's arrival grace applies before control returns.
+
+The boat (Doc 3 §5.3) reuses `DRIVING` with different handling constants and no zone crossing — the lake is one zone.
+
+---
+
+## 6. Interactions and trigger discipline
+
+### 6.1 Explicit interaction is an intent
+
+`Interactor` continues to choose the best target by range and facing exactly as Doc 2 §8 specifies. On `E`, it queues `INTERACT_REQUEST`; it does **not** call `current.interact(owner)` in `_unhandled_input()`.
+
+```gdscript
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed(&"interact") and current:
+		RuntimeEvents.enqueue(RuntimeEvent.Type.INTERACT_REQUEST, self,
+			{&"target": current})
+		get_viewport().set_input_as_handled()
+```
+
+At priority 13, `RuntimeDirector` verifies `PlayerController.State.FREE`, target enabled state, range, and `target.can_interact(player)` before invoking `target.interact(player)`. Re-verifying range at commit time is deliberate: the target may have moved or despawned since the intent was published.
+
+### 6.2 Passive triggers publish only
+
+| Node | Callback queues | Direct mutation it must not perform |
+|---|---|---|
+| `Checkpoint` | `CHECKPOINT_REACHED` | `GameState.set_checkpoint()` |
+| `SecretTrigger` | `SECRET_REVEAL_REQUEST` | unlock entry, SFX, weirdness pulse |
+| `AnomalyField` | enter/exit facts | zone progression or Player state |
+| `ZoneBoundary` | gated-travel request | scene loading or Player state |
+| `ZoneActivationVolume` | zone-activation request | palette/audio state |
+| `SeamBlocker` | `SEAM_FALLBACK_REQUEST` | transition start |
+| Enemy hitbox | polled, not queued (§4.3) | health subtraction or Journal fumble |
+| Story volume | `CUTSCENE_REQUEST` | dialogue start, camera seizure |
+
+`AnomalyField` (Doc 2 §6.1) is the one partial exception, and the boundary is precise: its **per-tick force integration into `external_force` is physics, not gameplay state**, and stays in `_physics_process` as written. Only its `Weirdness.pulse()` / `release()` calls move to the resolver, because those are committed presentation state.
+
+`RuntimeDirector` commits the resulting effect and then emits `checkpoint_committed`, `secret_revealed`, `damage_committed`, `zone_entered`, `chapter_advanced`. UI and audio subscribe to those committed signals only.
+
+### 6.3 Trigger arming
+
+```gdscript
+func can_process_world_triggers() -> bool:
+	return _lock_ticks == 0 and player.state not in [
+		PlayerController.State.ZONE_TRANSITION,
+		PlayerController.State.BLACKOUT,
+	]
+```
+
+During a gated transition, the destination scene may instantiate and its `Area2D`s may overlap Dipper at the spawn marker. Their callbacks must be ignored or queued as dormant until transition completion. The game must never award a checkpoint, secret, or anomaly effect while the screen is fading.
+
+---
+
+## 7. Zone travel
+
+### 7.1 Scene roles
+
+| Node | Responsibility |
+|---|---|
+| `ZoneBoundary` | Tests locked/unlocked travel and hosts the Journal-blocking collider. Doc 3 §3.1. |
+| `ZoneActivationVolume` | Thin `Area2D` placed **96 px inside** the destination side of every seamless boundary. The only node allowed to request `activate_zone()`. |
+| `SeamBlocker` | Doc 3 §3.3's soft block. Publishes `SEAM_FALLBACK_REQUEST` after `SEAM_BLOCK_GRACE`. |
+| `ZoneManager` | Loads/unloads scenes; commits current zone only through `activate_zone()`. |
+| `TransitionDirector` | Owns overlay fades and the gated-travel coroutine. |
+
+**Doc 3 §10's authoring checklist gains two items** (10 and 11), because §10 as written predates this node:
+
+> 10. A `ZoneActivationVolume` 96 px inside every seamless inbound edge — one per inbound direction, not one per boundary.
+> 11. A `SeamBlocker` on every seam-capable boundary, disabled by default.
+
+The 96 px activation depth prevents music and palette flicker if Dipper touches a seam, turns around, or is nudged backward by collision.
+
+### 7.2 `activate_zone()` is the single commit
+
+Doc 3 §3.2's `set_current()` is renamed and is now the only writer of current-zone state. Nothing else changes about its body.
+
+```gdscript
+# res://world/zone_manager.gd (supersedes Doc 3 §3.2 set_current)
+func activate_zone(id: StringName) -> void:
+	if id == current_zone:
+		return
+	current_zone = id
+	var def: ZoneDef = _defs[id]
+	Weirdness.set_zone_floor(def.ambient_weirdness)   # Doc 1 §2.1
+	AudioDirector.set_zone(def.bgm_id)                # Doc 5 §3
+	zone_entered.emit(id)
+```
+
+Doc 1 §1.6's `PaletteRegion` applies its palette on `_ready()` as written, but **does not call `Weirdness.set_zone_floor()`** — that call belongs here and nowhere else, or a streamed neighbour's `_ready()` would change the grade of the zone you are standing in.
+
+### 7.3 Seamless-zone sequence
+
+Prerequisite: the destination has been asynchronously loaded by Doc 3 §3.2's `_stream_neighbors()`.
+
+```text
+1. Dipper crosses ZoneBoundary while Journal is CLOSED.
+2. He moves into ZoneActivationVolume, 96 px inside the destination.
+3. Volume queues ZONE_ACTIVATION_REQUEST.
+4. RuntimeDirector validates: destination loaded, unlocked, Player is FREE or
+   DRIVING, no higher-priority event won.
+5. ZoneManager.activate_zone(destination) — palette floor, BGM crossfade
+   (Doc 5 §3), zone_entered.
+6. Destination passive triggers become eligible after zone_entered returns.
+7. An arrival-story request, if authored, waits for §7.7's grace.
+```
+
+**No transition lock is taken** (§4.5) — a seamless crossing never removes control, and resolution continues down §4.2's table for the rest of the tick. Audio starts **after** the scene is resident and **after** real entry, never during background loading. This is Doc 5 §11.5 restated as a sequence.
+
+### 7.4 Gated-zone sequence
+
+```text
+1. Dipper enters ZoneBoundary with Journal CLOSED.
+2. Boundary queues GATED_ZONE_REQUEST; RuntimeDirector validates it.
+3. Transition lock taken. Player enters ZONE_TRANSITION. Input and world
+   triggers disabled.
+4. TransitionDirector fades to opaque over 0.35 s. Old-zone BGM continues.
+5. ZoneManager frees the old-zone scene, loads/instantiates the destination,
+   and places Dipper (and any vehicle) at spawn_marker.
+6. ZoneManager.activate_zone(destination) — palette, current zone, BGM crossfade.
+7. TransitionDirector fades in over 0.35 s while the BGM crossfade continues.
+8. Transition lock released. Player returns to FREE; destination triggers arm.
+9. Arrival-story request waits for §7.7 before it may start.
+```
+
+Starting the music at step 6 is intentional: the new scene is real, Dipper is physically there, and the visual fade-in lets the new ambience arrive with the place rather than with a loading screen.
+
+`SEAM_FALLBACK_REQUEST` (Doc 3 §3.3's grace wipe) runs this same sequence with a 0.12 s wipe instead of a 0.35 s fade. It is the only transition a player can trigger by out-running the loader, and it is logged at `push_warning` level so playtesting reveals whether `STREAM_MARGIN` needs retuning.
+
+### 7.5 Journal boundary blocker
+
+Every `ZoneBoundary` includes a narrow `StaticBody2D` just inside the source-zone edge. `ZoneManager` enables it whenever `Journal.blocks_zone_travel()` is true and disables it only once the Journal returns `CLOSED`.
+
+The blocker has no dialogue and no auto-close behavior. It briefly shows the existing Journal affordance with the verb **Close Journal**. This prevents crossing the line while the book is open instead of repairing the state after the fact.
+
+Zone travel is physically blocked while the Journal is not `CLOSED`; it never auto-closes or fumbles merely because of a boundary.
+
+### 7.6 Interiors are zones
+
+Doc 3 §1.4's `ZoneDef` already carries `is_interior`. Interiors register in the same `registry` and travel the same commit path; only their streaming behaviour differs.
+
+| Property | Exterior zone | Interior zone |
+|---|---|---|
+| In `_stream_neighbors()` | Yes | **Never** — excluded by `is_interior` |
+| In `_cull_distant()` | Yes | Never; freed explicitly on exit |
+| Boundary node | `ZoneBoundary` | `DoorBoundary` (same script, 0.25 s wipe) |
+| Transition | §7.3 or §7.4 by `seam_chapter` | Always §7.4, gated |
+| `activate_zone()` | Yes | **Yes** — palette, weirdness floor, BGM |
+| Grid offset | Doc 3 §1.2 | `Vector2i(-1, -1)` sentinel; interiors are off-grid |
+| Exterior on entry | — | Freed; reloaded on exit at the door marker (Doc 3 §8) |
+
+This replaces Doc 3 §8's "no zone-manager involvement". The intent of Doc 3 §8 is preserved in full — interiors are still separate scenes, still never streamed, still bounded by `Camera2D.limit_*`, and `int_mansion` is still the one-scene exception. What changes is that `bgm_attic`, `bgm_lab`, and every interior palette now commit through the one path that §12 tests, instead of a second lifecycle that would need every rule in this document written twice.
+
+### 7.7 Arrival grace
+
+On arrival, Player becomes `FREE` before an automatic zone-entry story may take control. `CutsceneDirector` waits **0.15 s** (9 ticks) after input unlock, then may resolve the authored arrival-story request. This gives the player a visible, controllable arrival beat and guarantees that dialogue never starts underneath a transition overlay.
+
+Arrival dialogue may begin only after the fade finishes and Dipper has regained control.
+
+### 7.8 Lethal damage at a zone threshold
+
+If Dipper crosses the activation threshold and receives lethal damage in the same physics tick, the zone request commits first (priority 2 beats priority 3). `RuntimeDirector` records `_pending_blackout = true`, grants transition invulnerability, completes §7.3 or §7.4, then begins blackout from the destination after arrival is stable.
+
+If the zone request failed validation — Journal open, destination unavailable, locked, or threshold not crossed — there is no escape; lethal damage resolves normally.
+
+**Changing zones can save the player.** This is a deliberate, testable mercy, not an accident of ordering.
+
+---
+
+## 8. Cutscenes & dialogue
+
+### 8.1 Sequence
+
+```text
+1. Story volume queues CUTSCENE_REQUEST.
+2. RuntimeDirector first resolves same-tick damage.
+3. If lethal, blackout wins. If non-lethal, play the hit; cutscene remains pending.
+4. If Journal is OPENING or OPEN, cancel scan and finish the normal close.
+5. CutsceneDirector sets Player to CUTSCENE, then begins dialogue/camera control.
+6. On completion, Player returns to FREE. The Journal remains CLOSED.
+```
+
+Story volumes must disable themselves or set their persistent flag when their request is accepted; otherwise the player could immediately re-trigger the same cutscene after control returns. Chapter docs declare that flag by name (§9.2).
+
+### 8.2 Cutscene authoring surface for Docs 6–25
+
+```gdscript
+CutsceneDirector.request(&"ch03_gideon_intro", {
+	&"skippable": true,               # Doc 4 §7.4 chapter cards are always skippable
+	&"lines": [ ... DialogueLine ... ],
+	&"camera": &"path/to/CameraRig",
+	&"on_complete_flag": &"ch03_met_gideon",
+})
+```
+
+A cutscene never sets `GameState` fields directly. It declares `on_complete_flag`, and `RuntimeDirector` writes it on completion — so a cutscene interrupted by a blackout does not leave a half-set world.
+
+### 8.3 `pause_player` is removed
+
+Doc 4 §3.1's `DialogueLine.pause_player` set `PlayerController` to `CUTSCENE` directly, which §14.1 forbids. The field is deleted. Any line needing player lockout is authored as a `CUTSCENE_REQUEST` through §8.2.
+
+Everything else in Doc 4 §3 survives untouched — `Mode.AUTO` resolution, the combat bubble-forcing in §3.2, and §11.1's rule that box dialogue never renders during combat. `CombatDirector.threat_active` (§2.3) is what `resolve_mode()` reads.
+
+---
+
+## 9. Persistence, chapters & flags
+
+### 9.1 Save model
+
+**Autosave only. No manual save UI.** Doc 2 §12.10 promises that failure costs time and never progress; a manual-save model would break that promise for any player who quits mid-chapter.
+
+| Write trigger | Slot |
+|---|---|
+| `CHECKPOINT_REACHED` commits (priority 14) | 0 |
+| `CHAPTER_ADVANCE_REQUEST` commits (priority 15) | 0 |
+| `activate_zone()` commits a new zone | 0 |
+| `end_session()` (§3.3) | 0 |
+
+Writes are **deferred to the end of the tick and executed off the physics frame** — `GameState` sets a dirty flag during resolution and flushes in `_process()`. A save write never stalls a physics frame.
+
+Doc 3 §9 calls `int_attic` the "primary save point." Under autosave that reading holds without a save UI: the attic checkpoint is where players will naturally end a session, and Doc 5 §4.1's `bgm_attic` is already specced as the safety cue.
+
+**Web export:** `user://` persists through IndexedDB, which requires an explicit flush. Call it once per write, after `FileAccess.close()`, and never mid-frame.
+
+### 9.2 Save schema
+
+```gdscript
+# res://systems/game_state.gd — Autoload "GameState"
+const SAVE_VERSION := 1
+
+var chapter: int = 1
+var flags: Dictionary = {}              # StringName -> bool | int | float | String
+var inventory: Dictionary = {}          # StringName -> int
+var journal_entries: Array[StringName] = []
+var secrets_found: Array[StringName] = []
+var sigils_found: Array[StringName] = []      # Doc 3 §6.2, ten of them
+var ciphers_solved: Array[StringName] = []
+var checkpoint := {
+	&"id": &"", &"zone_id": &"", &"position": Vector2.ZERO, &"wake_line_id": &"",
+}
+var playtime: float = 0.0
+```
+
+`Settings` (Doc 4 §5.1, §7.3) is **not** in the save. It lives in `user://settings.cfg` and survives New Game — accessibility settings are a property of the person, not the playthrough.
+
+**Flag namespace.** Twenty chapter docs writing into one dictionary needs a rule, or Chapter 14 silently overwrites Chapter 3.
+
+| Prefix | Owner | Example |
+|---|---|---|
+| `ch<NN>_` | Chapter doc NN, exclusively | `ch03_met_gideon` |
+| `zone_` | Zone/world state | `zone_vending_code_known` |
+| `sys_` | This document | `sys_first_journal_open` |
+| `npc_` | Cross-chapter NPC relationship | `npc_wendy_trust` (int) |
+
+A chapter doc may **read** any flag and may **write** only its own `ch<NN>_` prefix plus the shared `zone_` / `npc_` namespaces. §12 check 10 asserts no flag is written under another chapter's prefix.
+
+**Version migration.** `SAVE_VERSION` bumps whenever a field is removed or its meaning changes; adding a field does not require a bump because missing keys read as defaults. `load_slot()` runs migrations in sequence and refuses to load a save from a *newer* version than the build, falling back to the main menu with a clear message rather than half-loading.
+
+### 9.3 What a blackout does not do
+
+Respawn reads **in-memory `GameState`**, never the disk. A secret found ten seconds before dying survives the death. Doc 2 §7.3's table is authoritative and unchanged: no progress lost, position at the last checkpoint, health full, cost is time and any in-progress scan, enemies respawn in the current room only. §11.2 gives the sequence.
+
+### 9.4 Chapter progression
+
+**Chapter docs advance the chapter, explicitly, at one named story beat each.** No quest system infers it.
+
+```gdscript
+RuntimeEvents.enqueue(RuntimeEvent.Type.CHAPTER_ADVANCE_REQUEST, self,
+	{&"to": 4, &"from": 3})
+```
+
+Rules:
+
+1. `chapter` is **monotonic**. A request whose `to` is not `from + 1` is rejected with `push_error`. Chapter Select uses §9.5, not this event.
+2. Committing at priority 15 means `current_zone`, damage, and every other commit for that tick have already landed. The advance never changes a gate another resolver step read this tick.
+3. On commit, `ZoneManager` re-evaluates residency: newly unlocked zones become streamable, and `is_seam_open()` (Doc 3 §3.2) may now return true for boundaries the player is standing near. Seams open **live**, without a transition — the boundary's `SeamLink` state activates on the next tick and the player can simply walk through.
+4. `chapter_advanced` is emitted after the write. Doc 3 §5.1's portal weirdness ramp and Doc 5 §5.4's portal hum stages subscribe to it; neither polls `GameState.chapter` per frame.
+5. An autosave follows immediately (§9.1).
+
+### 9.5 Chapter Select uses a scratch save
+
+Doc 4 §7.1 offers replayable chapters. Replay never touches slot 0.
+
+```text
+1. Copy slot 0 → memory. Load a chapter-start template into a scratch state.
+2. begin_session() against the scratch state. Autosaves (§9.1) write to slot
+   "scratch", never slot 0.
+3. On exit, the scratch slot is deleted and slot 0 is untouched.
+```
+
+Progress made during replay — secrets, sigils, entries — is discarded on exit. That is the cost of a single, always-coherent main save, and it is worth paying: the alternative requires all twenty chapter docs to be written defensively against flags moving backward.
+
+The chapter-start templates are authored per chapter doc as the minimum flag set that chapter assumes. §12 check 11 asserts every chapter's template satisfies its own opening preconditions.
+
+---
+
+## 10. Pause
+
+The pause menu is the only legal `get_tree().paused = true` (Doc 4 §7.2). This document defines when it may be entered.
+
+| Player state | `PAUSE_REQUEST` |
+|---|---|
+| `FREE`, `JOURNAL`, `ATTACKING`, `DODGING`, `HURT`, `FUMBLING`, `DRIVING` | Accepted |
+| `CUTSCENE` | **Dropped.** Skip is the cutscene's own affordance |
+| `ZONE_TRANSITION`, `BLACKOUT` | **Dropped** |
+
+Requests in a forbidden state are **dropped, not queued** — a pause that fires 0.4 s later, after the fade finished, reads as an input bug. The `ui_denied` cue (Doc 5 §5.6) plays instead.
+
+On pause: `RuntimeEvents` retains its queue but the resolver does not run, so pending intents resolve on the first tick after unpause. §2.4's tick counters simply stop, which is why they are counters and not wall-clock timers.
+
+`process_mode`:
+
+| Node | Mode |
+|---|---|
+| Every gameplay autoload and node | `PROCESS_MODE_PAUSABLE` (default) |
+| Pause menu UI, `Settings` | `PROCESS_MODE_WHEN_PAUSED` |
+| `AudioDirector` | `PROCESS_MODE_ALWAYS` — it applies Doc 5 §8's −12 dB + 900 Hz lowpass duck, which cannot happen on a paused node |
+
+---
+
+## 11. Failure & respawn
+
+### 11.1 Blackout
+
+At zero pips, Doc 2 §7.3's presentation runs as written: desaturate over 0.6 s, Dipper crumples, cut to black. Doc 5 §5.6 ducks `Master` by 24 dB over 0.6 s.
+
+`RuntimeDirector` sets Player to `BLACKOUT`, takes the lock for the blackout's own tick count, and forces Journal to `CLOSED` with no visible reopen. Priority 0 suppresses everything until the count reaches zero and a `RESPAWN_REQUEST` is queued.
+
+`BLACKOUT` is itself a locked state, so priority 1 in `_resolve()` is unreachable while it is active. **`_resolve_locked()` is the path that consumes `RESPAWN_REQUEST`** (§4.1), and it is the only event allowed through the priority-0 gate. Without that carve-out the player never wakes up.
+
+### 11.2 Respawn sequence
+
+```text
+1. BLACKOUT tick count reaches zero. RESPAWN_REQUEST queued.
+2. Resolver, _resolve_locked(). Read GameState.checkpoint (in memory, §9.3).
+3. If checkpoint.zone_id != current_zone:
+      run §7.4's gated sequence to that zone, overlay already opaque —
+      no fade-out is played, we are already black.
+   Else:
+      place the player at checkpoint.position.
+4. Health restored to full (Doc 2 §7.3). Stamina full. external_force cleared.
+5. Enemies in the current room respawn; CombatDirector.reset() clears aggro
+   so the player does not wake into an active threat state.
+6. Weirdness returns to the zone floor via activate_zone(), or set_zone_floor()
+   if the zone did not change.
+7. AudioDirector releases the blackout duck over 1.0 s (Doc 5 §8).
+8. TransitionDirector fades in. Lock released. Player → FREE.
+9. The checkpoint's wake_line_id (Doc 2 §7.3) is authored as a CUTSCENE_REQUEST
+   and waits for §7.7's arrival grace like any other arrival dialogue.
+```
+
+Step 3 is why respawn sits at priority 1 rather than being a special case: a cross-zone respawn genuinely *is* zone travel, and reusing §7.4 means it is covered by the same tests.
+
+---
+
+## 12. Required implementation checks
+
+The resolver is a pure function of (queue, state). §12's harness exploits that: it drives `RuntimeDirector._resolve()` directly with hand-enqueued events and stub systems, so no physics server, no rendering, and no real scenes are needed. Run headless.
+
+```gdscript
+# res://runtime/test_runtime.gd — godot --headless --script res://runtime/test_runtime.gd
+extends SceneTree
+
+func _init() -> void:
+	var h := RuntimeHarness.new()          # stubs Player, Journal, ZoneManager, Health
+
+	# --- check 7: a threshold crossing plus lethal damage reaches the
+	#     destination before blackout begins ------------------------------
+	h.reset()
+	h.player.state = PlayerController.State.FREE
+	h.enqueue(RuntimeEvent.Type.ZONE_ACTIVATION_REQUEST, {&"to": &"z_town"})
+	h.enqueue(RuntimeEvent.Type.LETHAL_DAMAGE, {&"amount": 6})
+	h.step()
+	assert(h.zone.current == &"z_town", "zone request must win over lethal damage")
+	assert(h.director._pending_blackout, "blackout must be deferred, not dropped")
+	assert(h.player.state != PlayerController.State.BLACKOUT,
+		"blackout must not begin before arrival")
+
+	# --- check 4: damage and E in the same frame ------------------------
+	h.reset()
+	h.enqueue(RuntimeEvent.Type.INTERACT_REQUEST, {&"target": h.stub_interactable})
+	h.enqueue(RuntimeEvent.Type.DAMAGE, {&"amount": 1})
+	h.step()
+	assert(h.health.current == h.health.max_pips - 1, "damage must apply")
+	assert(h.stub_interactable.interact_calls == 0, "interact must be cancelled")
+
+	print("runtime: all checks passed")
+	quit()
+```
+
+Automated Godot headless tests must prove:
+
+1. A preloaded destination does not call `AudioDirector.set_zone()` until its `ZoneActivationVolume` is crossed.
+2. Crossing an open seam calls `activate_zone()` exactly once and updates `current_zone`, palette, BGM, and map signal together.
+3. A Journal blocker prevents zone activation while the Journal is `OPEN`, `OPENING`, `CLOSING`, or `FUMBLED`.
+4. Damage and `E` in the same physics frame reduce health but do not call `interact()`.
+5. A hitbox already active in the frame defeats a dodge request; an active i-frame defeats a later hit.
+6. Destination checkpoint/secret/anomaly callbacks do not commit during a gated transition.
+7. A same-tick threshold crossing plus lethal damage reaches the destination before blackout begins.
+8. A Journal-active cutscene performs one normal close, never reopens the Journal, and begins only after any same-tick hit resolves.
+9. `PAUSE_REQUEST` is dropped — not queued — in `CUTSCENE`, `ZONE_TRANSITION`, and `BLACKOUT`, and accepted in every other state.
+10. No chapter doc's flag writes touch another chapter's `ch<NN>_` prefix (static scan over authored chapter resources).
+11. Every chapter-start template (§9.5) satisfies that chapter's declared opening preconditions.
+12. `end_session()` leaves no autoload holding a reference to a freed node; `begin_session()` immediately after it produces a playable state.
+13. A save written at `SAVE_VERSION` round-trips every §9.2 field, and a save from a newer version is refused rather than partially loaded.
+14. A cross-zone respawn reaches the checkpoint zone, restores full health, and clears aggro before control returns.
+15. `RuntimeDirector.process_physics_priority` is greater than every gameplay node's, verified at runtime in `_ready()` with an assert.
+16. **An event published outside the physics pass survives to the next resolve.** Enqueue with no intervening `swap()`, run two resolves, assert the event was seen exactly once — the regression test for §2.5's input-loss class.
+17. A seamless `ZONE_ACTIVATION_REQUEST` takes no lock, leaves the player `FREE`, and **does not prevent a same-tick hit from landing**; a `GATED_ZONE_REQUEST` does take the lock and ends the tick.
+18. A `CHECKPOINT_REACHED` published on the same tick as a seamless activation commits — that tick or the next — and is never silently lost (§4.6).
+19. `RESPAWN_REQUEST` is consumed by `_resolve_locked()` during `BLACKOUT`; a blackout with a queued respawn always reaches `FREE` within its expected tick count and never deadlocks.
+20. Gated transition, door wipe, boot, and respawn all release control on `_lock_ticks == 0`, with the fade tween stubbed out entirely — proving no gameplay state depends on an animation completing (§4.5).
+
+Checks 1–3, 6, and 14 need a real scene tree; run them from a small `test_runtime.tscn` driven by `Engine.get_physics_frames()`. The rest run from the pure harness above.
+
+---
+
+## 13. What chapter documents (6–25) must use
+
+Every chapter doc is authored against this surface and nothing below it.
+
+| Need | Use | Never |
+|---|---|---|
+| Story beat fires | `CUTSCENE_REQUEST` via §8.2 | Call dialogue from a zone `Area2D` |
+| Player lockout for a line | A cutscene (§8.3) | `DialogueLine.pause_player` — removed |
+| Chapter ends | `CHAPTER_ADVANCE_REQUEST`, `to = from + 1` | Write `GameState.chapter` |
+| Persist a beat | `on_complete_flag`, `ch<NN>_` prefix (§9.2) | Write another chapter's flags |
+| Boss phase change | `CombatDirector.boss_phase` (§2.3) | Touch Doc 5's stem gains |
+| Mid-fight line | `Mode.BUBBLE` (Doc 4 §3.2, §11.1) | `Mode.BOX` during combat |
+| New creature | `PropScannable` + Doc 2 §5.4 scan entry | Bespoke reveal logic |
+| Cipher | Doc 2 §5.6 `Cipher` + Doc 3 §6.1 schedule | A per-chapter cipher implementation |
+| Hard gate | Always author a non-cipher path (Doc 2 §12.9) | A cipher-only wall |
+| Respawn point | `Checkpoint` node, Doc 3 §9 placement rule | Custom respawn handling |
+
+---
+
+## 14. Contracts exported to Documents 1–5 and chapter docs
+
+1. Gameplay mutations are committed only by `RuntimeDirector`; Godot callbacks publish events. The one scoped exception is `AnomalyField`'s per-tick force integration (§6.2).
+2. `ZoneManager.activate_zone()` is the only path that changes `current_zone`, zone palette floor, and zone BGM — for exteriors and interiors alike.
+3. Zone activation happens 96 px inside a destination, not merely at a shared edge.
+4. Journal-open players cannot change zones or board vehicles; boundaries block rather than auto-close the Journal.
+5. Audio changes on committed zone activation, never on scene preload.
+6. Damage cancels interactions; same-tick hit resolution precedes cutscene start, attack, and dodge commitment.
+7. A committed zone transition can defer lethal damage until the destination is reached.
+8. Destination-world triggers remain dormant until the gated transition finishes and Player control returns.
+9. Chapter docs author arrival dialogue as a `CUTSCENE_REQUEST`, never invoke dialogue directly from a zone `Area2D`.
+10. No gameplay duration uses a `SceneTree` timer. Durations are tick counts derived from the owning document's constant.
+11. `RuntimeDirector.process_physics_priority = 100`. The frame contract is void without it.
+12. Saving is automatic and slot 0 is the only real save. Chapter replay uses a scratch slot and discards its progress.
+13. `GameState.chapter` is monotonic and advances only by `CHAPTER_ADVANCE_REQUEST` from a chapter doc.
+14. Flags are namespaced `ch<NN>_` / `zone_` / `sys_` / `npc_`. A chapter writes only its own prefix and the shared ones.
+15. `Settings` is never part of a save.
+16. Respawn reads in-memory state, never disk. Failure costs time, never progress.
+17. Pause is dropped, not queued, in `CUTSCENE`, `ZONE_TRANSITION`, and `BLACKOUT`.
+18. `CombatDirector` is the single source of `threat_active` and `boss_phase`; the HUD, dialogue mode selection, and boss audio all read it.
+19. The event queue is double-buffered and swapped by `RuntimeDirector` alone. Nothing clears it on a schedule, so an event published from an idle-frame input handler can never be dropped unseen.
+20. **Seamless travel takes no transition lock and does not end the tick.** Only gated travel, the seam fallback, and a cross-zone respawn lock the frame.
+21. A transition's duration is a physics-tick countdown. Tweens mirror it; no tween, fade, or animation ever gates a gameplay state change.
+22. `RESPAWN_REQUEST` is the only event that passes the priority-0 gate, consumed by `_resolve_locked()`.

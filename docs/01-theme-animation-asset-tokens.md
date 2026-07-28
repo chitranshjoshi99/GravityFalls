@@ -131,7 +131,7 @@ extends Resource
 
 ### 1.6 Zone palette instances
 
-One `.tres` per zone. Doc 3 binds these to map scenes; each zone's `PaletteRegion` node applies its palette on `_ready()` and tweens the grade on transition.
+One `.tres` per zone. Doc 3 binds these to map scenes; each zone's `PaletteRegion` node applies its palette on `_ready()`. The **grade** is not its to set — `ZoneManager.activate_zone()` owns `Weirdness.set_zone_floor()` (Doc 00 §7.2), so a preloaded neighbour cannot change the weirdness of the zone the player is standing in.
 
 | File | Zone | `ambient_weirdness` |
 |---|---|---|
@@ -216,7 +216,9 @@ func bind(mat: ShaderMaterial) -> void:
 	_mat = mat
 	_apply(level)
 
-## Called by PaletteRegion on zone entry. Persistent until the next zone.
+## Called by ZoneManager.activate_zone() only (Doc 00 §7.2). Persistent until the
+## next zone. PaletteRegion applies colors; it must not touch the grade, or a
+## streamed neighbour's _ready() would change the grade of the zone you're in.
 func set_zone_floor(value: float, duration: float = DEFAULT_FADE) -> void:
 	_zone_floor = clampf(value, 0.0, 1.0)
 	_retween(duration)

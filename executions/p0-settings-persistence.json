@@ -1,0 +1,46 @@
+{
+  "requirement": "Implement Build Tracker rows 0.7 and 0.8: accessible user settings and reliable JSON save persistence.",
+  "workspace": "/Users/chitranshjoshi/Work/GravityFalls",
+  "checkpointEvery": 3,
+  "approvalCheckpoints": false,
+  "architecture": {
+    "decision": "Settings persist independently in ConfigFile and drive Weirdness through a narrow accessibility method; SaveData is a pure value resource while GameState owns versioned JSON serialization and atomic slot replacement.",
+    "alternatives": ["Store settings inside SaveData", "Let UI write shader parameters directly", "Persist save data with store_var"],
+    "tradeoffs": ["Keeping settings outside a playthrough preserves accessibility choices across New Game; the narrow Weirdness seam proves reduce-flashing changes the material; JSON stays portable across engine versions at the cost of explicit type normalization."],
+    "seams": ["Settings never gates gameplay verbs and is registered after Tokens and Weirdness.", "Only GameState.deserialize rebuilds JSON String keys as StringName and checkpoint position arrays as Vector2.", "write_atomic writes a temp sibling then renames it over the slot; no manual save UI or alternate slot is introduced."]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "trackerRow": "0.7",
+      "title": "Persist the three accessibility settings and apply flashing reduction",
+      "intent": "Add the Settings autoload backed by user://settings.cfg and ensure reduce_flashing clamps a bound Weirdness shader material's aberration_px.",
+      "ownership": ["autoload/settings.gd", "autoload/weirdness.gd", "project.godot", "tests/test_all.gd"],
+      "constraints": ["Only text_effects_enabled, text_scale, and reduce_flashing ship in this row.", "Text scale is limited to 1.0, 1.25, or 1.5.", "Settings is not part of SaveData and never controls InputMap/gameplay verbs."],
+      "acceptance": "Settings load/save through ConfigFile, survive GameState.new_game(), and reduce_flashing changes aberration_px from 6.0 to at most 0.3 on a bound Weirdness material.",
+      "verify": ["godot --headless --script res://tests/test_all.gd"],
+      "visual": null,
+      "dependsOn": ["0.6"],
+      "status": "completed",
+      "result": "Settings persists the three accessibility preferences through ConfigFile and pushes reduce_flashing into Weirdness, which clamps a bound material's aberration_px to 0.3.",
+      "evidence": ["godot --headless --script res://tests/test_all.gd (exit 0; 197 checks passed)"],
+      "error": null
+    },
+    {
+      "id": "T2",
+      "trackerRow": "0.8",
+      "title": "Add typed JSON save data and atomic slot replacement",
+      "intent": "Implement SaveData and GameState.data with version refusal, StringName/Vector2 normalization, and temp-then-rename writes.",
+      "ownership": ["core/save_data.gd", "autoload/game_state.gd", "project.godot", "tests/test_all.gd"],
+      "constraints": ["All persisted game fields live under GameState.data.", "Deserialize is the only normalization boundary.", "Atomic writes target slot 0 and must preserve an older valid slot if interrupted before rename."],
+      "acceptance": "A complete SaveData round-trip preserves fields and key/value types, newer save versions are refused, a simulated interrupted save leaves the previous slot loadable, and New Game replaces data without touching Settings.",
+      "verify": ["godot --headless --script res://tests/test_all.gd"],
+      "visual": null,
+      "dependsOn": ["T1"],
+      "status": "completed",
+      "result": "SaveData is the complete persisted value, while GameState owns versioned JSON normalization and temp-then-rename slot replacement; the round-trip and interrupted-save gates pass.",
+      "evidence": ["godot --headless --editor --quit (exit 0)", "godot --headless --script res://tests/test_all.gd (exit 0; 197 checks passed)"],
+      "error": null
+    }
+  ]
+}

@@ -13,11 +13,14 @@ extends Node
 signal level_changed(value: float)
 
 const DEFAULT_FADE := 1.2
+const DEFAULT_ABERRATION_PX := 6.0
+const REDUCED_ABERRATION_PX := 0.3
 
 var _zone_floor: float = 0.0
 var _event_level: float = 0.0
 var _mat: ShaderMaterial
 var _tween: Tween
+var _reduce_flashing: bool = false
 
 ## Where the tween is HEADED — the stronger of the zone baseline and any active
 ## event. This is a target, not a value anything should render or mix against.
@@ -42,6 +45,13 @@ var applied: float = 0.0
 func bind(mat: ShaderMaterial) -> void:
 	_mat = mat
 	_apply(target_level)
+	_apply_accessibility()
+
+
+## Settings owns the preference; Weirdness owns the material it must affect.
+func set_reduce_flashing(enabled: bool) -> void:
+	_reduce_flashing = enabled
+	_apply_accessibility()
 
 
 ## ZoneManager.activate_zone() only. Persistent until the next zone.
@@ -76,3 +86,11 @@ func _apply(v: float) -> void:
 	if _mat:
 		_mat.set_shader_parameter("weirdness", v)
 	level_changed.emit(v)
+
+
+func _apply_accessibility() -> void:
+	if _mat:
+		_mat.set_shader_parameter(
+			"aberration_px",
+			REDUCED_ABERRATION_PX if _reduce_flashing else DEFAULT_ABERRATION_PX
+		)

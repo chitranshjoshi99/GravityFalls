@@ -18,6 +18,9 @@ const CharacterProportionsResource := preload("res://core/character_proportions.
 const TubeGeometry := preload("res://core/tube.gd")
 const EyeGeometry := preload("res://core/eyes.gd")
 const WeirdnessScript := preload("res://autoload/weirdness.gd")
+const SettingsScript := preload("res://autoload/settings.gd")
+const SaveDataResource := preload("res://core/save_data.gd")
+const GameStateScript := preload("res://autoload/game_state.gd")
 
 ## Doc 01 §10's tree, which is the single authority for every res:// path in
 ## the project. A directory not on this list is a finding: either the file
@@ -108,6 +111,8 @@ func _init() -> void:
 	_check_tokens_and_resources(h)  # tracker 0.4
 	_check_geometry(h)              # tracker 0.5
 	_check_weirdness(h)             # tracker 0.6 / Doc 00 §12 check 36
+	_check_settings(h)              # tracker 0.7
+	_check_save_data(h)             # tracker 0.8 / Doc 00 §12 checks 32–33
 
 	# --- (scene) checks -----------------------------------------------------
 	# Doc 00 §12's checks 1-3, 6, 14, 34, 35 and 39 need a real scene tree and
@@ -304,6 +309,125 @@ func _check_weirdness(h) -> void:
 	)
 
 	w.free()
+
+
+## Tracker 0.7 / Doc 04 §5.1. Preferences are person-level data, not a
+## playthrough field: the test uses an isolated config path and never touches
+## the developer's real settings.cfg.
+func _check_settings(h) -> void:
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/Settings"), "*res://autoload/settings.gd",
+		"Settings autoload registration"
+	)
+	var path := "user://test_settings_0_7.cfg"
+	DirAccess.remove_absolute(path)
+	var settings: Node = SettingsScript.new()
+	settings.load_from(path)
+	h.expect(settings.text_effects_enabled, "text effects default on")
+	h.expect_eq(settings.text_scale, 1.0, "text scale default")
+	h.expect(not settings.reduce_flashing, "reduce flashing default off")
+
+	settings.text_effects_enabled = false
+	settings.text_scale = 1.37
+	settings.reduce_flashing = true
+	h.expect_eq(settings.text_scale, 1.25, "text scale snaps to a supported value")
+	h.expect(settings.save_to(path), "Settings writes its ConfigFile")
+
+	var reloaded: Node = SettingsScript.new()
+	reloaded.load_from(path)
+	h.expect(not reloaded.text_effects_enabled, "text effects setting persists")
+	h.expect_eq(reloaded.text_scale, 1.25, "text scale persists")
+	h.expect(reloaded.reduce_flashing, "reduce flashing persists")
+
+	var state: Node = GameStateScript.new()
+	state.new_game()
+	h.expect(not reloaded.text_effects_enabled and reloaded.reduce_flashing,
+		"New Game does not reset person-level settings")
+
+	var shader := load("res://shaders/weirdness.gdshader")
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	var weirdness: Node = WeirdnessScript.new()
+	weirdness.bind(material)
+	reloaded.apply_to_weirdness(weirdness)
+	h.expect_eq(material.get_shader_parameter("aberration_px"), 0.3,
+		"reduce flashing clamps the shader aberration")
+	reloaded.reduce_flashing = false
+	reloaded.apply_to_weirdness(weirdness)
+	h.expect_eq(material.get_shader_parameter("aberration_px"), 6.0,
+		"normal flashing restores the authored aberration")
+	settings.free()
+	reloaded.free()
+	state.free()
+	weirdness.free()
+	DirAccess.remove_absolute(path)
+
+
+## Tracker 0.8 / Doc 00 §9.2. Assert every field and the types JSON normally
+## loses; merely checking equal values would miss StringName-key regressions.
+func _check_save_data(h) -> void:
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/GameState"), "*res://autoload/game_state.gd",
+		"GameState autoload registration"
+	)
+	var source := SaveDataResource.new()
+	source.chapter = 3
+	source.flags = {&"ch01_gnomes_defeated": true, &"npc_wendy_trust": 2}
+	source.inventory = {&"journal_3": 1, &"uv_penlight": 1}
+	source.journal_entries = [&"entry_gnomes"]
+	source.journal_overrides = {
+		&"entry_gnomes": {&"weakness_written": "leaf blowers", &"weakness_verified": true}
+	}
+	source.secrets_found = [&"secret_shack_roof"]
+	source.sigils_found = [&"sigil_hand"]
+	source.ciphers_solved = [&"ch01_attic_caesar"]
+	source.checkpoint = {
+		&"id": &"cp_ch01_porch", &"zone_id": &"z_shack_ext",
+		&"spawn_marker": &"sp_ch01_porch", &"wake_line_id": &"line_wake",
+		&"position": Vector2(112.5, -48.25), &"encounter": {&"boss_id": &"boss_gnomonster", &"phase": 2},
+	}
+	source.playtime = 123.5
+
+	var restored := GameStateScript.deserialize(GameStateScript.serialize(source))
+	h.expect(restored != null, "serialized SaveData deserializes")
+	if restored != null:
+		h.expect_eq(restored.chapter, source.chapter, "chapter round-trips")
+		h.expect_eq(restored.flags, source.flags, "flags round-trip")
+		h.expect_eq(restored.inventory, source.inventory, "inventory round-trips")
+		h.expect_eq(restored.journal_entries, source.journal_entries, "journal entries round-trip")
+		h.expect_eq(restored.journal_overrides, source.journal_overrides, "journal overrides round-trip")
+		h.expect_eq(restored.secrets_found, source.secrets_found, "secrets round-trip")
+		h.expect_eq(restored.sigils_found, source.sigils_found, "sigils round-trip")
+		h.expect_eq(restored.ciphers_solved, source.ciphers_solved, "ciphers round-trip")
+		h.expect_eq(restored.checkpoint, source.checkpoint, "checkpoint round-trips")
+		h.expect_eq(restored.playtime, source.playtime, "playtime round-trips")
+		h.expect_eq(typeof(restored.flags.keys()[0]), TYPE_STRING_NAME, "flag key restores as StringName")
+		h.expect_eq(typeof(restored.journal_overrides.keys()[0]), TYPE_STRING_NAME,
+			"journal override key restores as StringName")
+		h.expect(restored.checkpoint[&"position"] is Vector2, "checkpoint position restores as Vector2")
+
+	var newer := JSON.stringify({"version": GameStateScript.SAVE_VERSION + 1})
+	h.expect(GameStateScript.deserialize(newer) == null, "newer save version is refused")
+
+	var state: Node = GameStateScript.new()
+	state.data = source
+	state.new_game()
+	h.expect(state.data.journal_overrides.is_empty(), "New Game clears journal overrides")
+
+	var slot := "user://test_slot0_0_8.sav"
+	DirAccess.remove_absolute(slot)
+	DirAccess.remove_absolute(slot + ".tmp")
+	h.expect(GameStateScript.write_atomic(slot, source), "initial slot writes atomically")
+	var replacement := SaveDataResource.new()
+	replacement.chapter = 4
+	h.expect(not GameStateScript.write_atomic(slot, replacement, true),
+		"interrupted write stops before rename")
+	var after_interruption := GameStateScript.load_from_path(slot)
+	h.expect(after_interruption != null and after_interruption.chapter == source.chapter,
+		"interrupted save leaves the previous slot loadable")
+	state.free()
+	DirAccess.remove_absolute(slot)
+	DirAccess.remove_absolute(slot + ".tmp")
 
 
 func _signed_area(points: PackedVector2Array) -> float:

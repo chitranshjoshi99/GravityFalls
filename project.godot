@@ -17,6 +17,8 @@ config/features=PackedStringArray("4.4")
 ; reference autoloads registered above it during _ready().
 Tokens="*res://autoload/tokens.gd"
 Weirdness="*res://autoload/weirdness.gd"
+Settings="*res://autoload/settings.gd"
+GameState="*res://autoload/game_state.gd"
 
 [display]
 

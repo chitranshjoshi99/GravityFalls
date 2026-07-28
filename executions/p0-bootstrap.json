@@ -1,0 +1,64 @@
+{
+  "requirement": "Build tracker rows 0.1, 0.2 and 0.3 of the Gravity Falls Chapter 1 test flight: create the Godot 4.x project with the locked display settings and a macOS export preset, establish the locked project folder layout with tests/ and tools/ excluded from the export, and stand up the res://tests/test_all.gd + harness.gd suite skeleton that every later row appends its check to.",
+  "repo": "/Users/chitranshjoshi/Work/GravityFalls",
+  "checkpointEvery": 3,
+  "toolchain": {
+    "godot": "/Applications/Godot.app/Contents/MacOS/Godot (4.7.1.stable), symlinked to /opt/homebrew/bin/godot",
+    "testCommand": "godot --headless --script res://tests/test_all.gd"
+  },
+  "architecture": {
+    "decision": null,
+    "seams": [
+      "res://tests/test_all.gd is the single entry point for the whole suite. Later rows append checks to it; nothing introduces a second suite entry point or a test framework dependency.",
+      "res://tests/harness.gd holds the shared stub/assert scaffolding (the RuntimeHarness of Doc 00 §12) that later rows extend. Checks marked (scene) are entered from test_all.gd but run against res://tests/scene_harness.tscn; the skeleton must leave room for that split without building it yet.",
+      "Doc 01 §10's directory tree is the single authority for every res:// path in the project. Any new file goes where the §10 placement rule says, and no file lives outside the tree."
+    ],
+    "adr": null,
+    "note": "No architecture pre-pass was run. Docs 00-06 already lock the stack, the folder layout, the display settings and the test entry point, so there is no open design fork for these three rows to settle."
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Create the Godot 4.x project file with the locked display settings",
+      "trackerRow": "0.1",
+      "intent": "Stand up res://project.godot as a Godot 4.x project named for the game, with the canvas and stretch settings that Doc 01 §0 locks: 1920x1080 viewport, stretch_mode = canvas_items, stretch_aspect = keep. These three values are load-bearing for Doc 03's CELL grid and Doc 04's absolute pixel HUD layout, so they are set once here and never restated elsewhere.",
+      "files": ["project.godot"],
+      "constraints": "Godot 4.x config_version. Set display/window/size/viewport_width = 1920, viewport_height = 1080, display/window/stretch/mode = \"canvas_items\", display/window/stretch/aspect = \"keep\". Do not register any autoload yet; autoloads land in rows 0.4 onward. Do not set a main scene; no scene exists yet. Do not add rendering, physics or input overrides that the docs have not asked for.",
+      "acceptance": "project.godot exists at the repo root, Godot loads the project headlessly without error, and ProjectSettings reports viewport 1920x1080, stretch mode canvas_items, stretch aspect keep.",
+      "verify": "godot --headless --editor --quit",
+      "visual": "The letterboxing observation in the tracker's Verify column ('true 16:9 on a 16:10 panel') cannot be made until a scene exists to render. The programmatic half of the gate — the three ProjectSettings values — is asserted in T3's suite. The visual half is carried to tracker row 1.1, when the first scene is built.",
+      "depends_on": [],
+      "status": "done",
+      "result": "project.godot created at the repo root; Godot 4.7.1 imports it clean and ProjectSettings reads back 1920 / 1080 / canvas_items / keep."
+    },
+    {
+      "id": "T2",
+      "title": "Establish the locked folder layout and the export filter",
+      "trackerRow": "0.2",
+      "intent": "Adopt Doc 01 §10's directory tree as the project's layout and make the export exclude tests/ and tools/ from day one, per the tracker row's Notes. Doc 01 §10 also states 'Create no folder before its first file' — an empty directory is speculative scaffolding — so this task creates only the directories that have a file landing in them now, and records the full tree as the authority that T3's structure check enforces.",
+      "files": ["export_presets.cfg", "tests/", "tools/", ".gitignore"],
+      "constraints": "Do NOT mkdir the full 40-directory tree; Doc 01 §10 forbids creating a folder before its first file. Create only tests/ (T3 fills it); tools/ waits for Doc 05 §7.1's bake_placeholders.gd at tracker row 3.1. Add a macOS export preset to export_presets.cfg with exclude_filter covering tests/ and tools/. Do not invent directories the docs do not name, and do not rename anything in the §10 tree.",
+      "acceptance": "export_presets.cfg carries a macOS preset whose exclude_filter excludes tests/ and tools/; the preset is tracked in git; no directory exists that Doc 01 §10 does not name.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T1"],
+      "status": "done",
+      "result": "macOS export preset added with exclude_filter 'tests/*, tools/*'; .gitignore amended to stop ignoring export_presets.cfg, since the filter is a tracked deliverable; no speculative directories created. Enforced by T3's structure walk.",
+      "deviation": "Doc 01 §10 draws tools/ OUTSIDE res://, which is only literally achievable if the Godot project root is a subdirectory of the repo. That would break the tracker's stated one test command ('godot --headless --script res://tests/test_all.gd', no --path). Repo root is therefore the project root, tools/ sits inside res://, and the export preset's exclude_filter is what enforces §10's actual requirement — never shipped, never run at boot. Flagged rather than swapped silently."
+    },
+    {
+      "id": "T3",
+      "title": "Stand up the test_all.gd suite skeleton and harness",
+      "trackerRow": "0.3",
+      "intent": "Create res://tests/test_all.gd (a SceneTree script, the single entry point for every check in the project) and res://tests/harness.gd (the shared assertion and future-stub scaffolding). The skeleton must run green today and be the place every later tracker row appends its check. It carries the first real checks: T1's three ProjectSettings values, and the Doc 01 §10 structure walk that is tracker row 0.2's Verify column.",
+      "files": ["tests/test_all.gd", "tests/harness.gd"],
+      "constraints": "test_all.gd extends SceneTree with a _init() that runs the checks, prints a pass line, and calls quit() with exit code 0 on success and a nonzero code on failure — the command 'godot --headless --script res://tests/test_all.gd' must exit 0 when green and nonzero when a check fails. Do not add a test framework dependency (no GUT, no gdUnit); Doc 00 §12's suite is plain asserts. Note that Godot's release builds strip assert(), so failures must be reported through an explicit check helper in harness.gd that records and returns a failure rather than relying on assert() alone. Leave a clearly marked seam for the (scene) checks that later rows will run from res://tests/scene_harness.tscn, but do NOT build scene_harness.tscn now — no row needs it yet. Keep the structure walk data-driven from a single list of the Doc 01 §10 allowed paths, so a later row amends one list rather than editing walk logic.",
+      "acceptance": "'godot --headless --script res://tests/test_all.gd' exits 0 and prints a pass summary; the suite asserts viewport 1920x1080, stretch mode canvas_items and stretch aspect keep; the suite walks res:// and fails if any file or directory sits outside the Doc 01 §10 tree; deliberately breaking a checked value makes the command exit nonzero.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T1", "T2"],
+      "status": "done",
+      "result": "tests/test_all.gd (SceneTree entry point) + tests/harness.gd (expect/expect_eq bookkeeping, no bare assert() so release builds cannot silently pass). 5 checks green, exit 0; a planted stray root file drove it to 'test_all: 4 passed, 1 FAILED' and exit 1, so the gate bites in both directions."
+    }
+  ]
+}

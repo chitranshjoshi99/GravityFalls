@@ -47,9 +47,9 @@ Nothing is playable until this is done, and everything else assumes it. Build it
 
 | # | Task | Spec | Verify | Status | Notes |
 |---|---|---|---|---|---|
-| 0.1 | Godot 4.x project; `project.godot`; macOS export preset; `stretch_mode = canvas_items`, `stretch_aspect = keep`, 1920×1080 | 01§0 | Window opens at true 16:9 on a 16:10 panel — letterboxed, not stretched | ⬜ | |
-| 0.2 | Folder tree exactly per the locked layout; `tests/` and `tools/` added to the export filter | 01§10 | Every directory in the tree exists or is absent-by-design; no file outside it | ⬜ | Placement rule is the tie-breaker for anything new |
-| 0.3 | `tests/test_all.gd` + `harness.gd` skeleton that runs and prints | 00§12 | `godot --headless --script res://tests/test_all.gd` exits 0 | ⬜ | Every later row appends here |
+| 0.1 | Godot 4.x project; `project.godot`; macOS export preset; `stretch_mode = canvas_items`, `stretch_aspect = keep`, 1920×1080 | 01§0 | Window opens at true 16:9 on a 16:10 panel — letterboxed, not stretched | ✅ | Godot 4.7.1. Settings asserted in `test_all.gd`. **The letterbox observation is carried to 1.1** — it needs something on screen, and no scene exists yet |
+| 0.2 | Folder tree exactly per the locked layout; `tests/` and `tools/` added to the export filter | 01§10 | Every directory in the tree exists or is absent-by-design; no file outside it | ✅ | Placement rule is the tie-breaker for anything new. Structure walk in `test_all.gd` enforces it. **Repo root is the project root**, so `tools/` sits inside `res://` and the export `exclude_filter` — not the path — is what keeps it unshipped |
+| 0.3 | `tests/test_all.gd` + `harness.gd` skeleton that runs and prints | 00§12 | `godot --headless --script res://tests/test_all.gd` exits 0 | ✅ | Every later row appends here. `harness.gd` uses recorded `expect()`, not `assert()` — release builds strip asserts. `scene_harness.tscn` unbuilt until a row needs a tree |
 | 0.4 | `Tokens` (constants), `Palette`, `CharacterProportions` resources | 01§1, §3 | Palette `.tres` loads; proportion segments sum to declared height | ⬜ | |
 | 0.5 | `Tube.capsule` / `hose_weights`, `Eyes.geometry` / `pupil_offset` | 01§4, §5 | `01§11` — capsule winding + bounds, **blend band contains ≥4 vertices**, weights partition to 1.0, pupil never escapes sclera | ⬜ | The blend-band assert is the one that matters; see AUDIT B1 |
 | 0.6 | `Weirdness` autoload: `target_level` / `applied`, `bind()`, `pulse`/`release`/`set_zone_floor`, weirdness shader | 01§2 | `00§12·36` — `level_changed` carries `applied`; a `pulse` mid-tween leaves one writer of any driven value | ⬜ | |
@@ -213,3 +213,4 @@ Nothing here starts until the game is playable end to end and P6 is answered.
 | Date | Row | Change |
 |---|---|---|
 | 2026-07-28 | — | Tracker created from `AUDIT.md` findings and the four locked decisions: web best-effort, `Journal` on the player, `stretch_aspect = keep`, golf cart kept in Chapter 1 |
+| 2026-07-28 | 0.1–0.3 | Done. Godot 4.7.1 installed; project created; suite green at 5 checks. Plan file: `executions/p0-bootstrap.json`. One deviation recorded on 0.2 — `tools/` cannot be outside `res://` without a project subdirectory, which would break this file's one test command; the export filter enforces §10's intent instead |

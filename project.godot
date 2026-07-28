@@ -1,0 +1,19 @@
+; Engine configuration file.
+; Doc 01 §0 locks the three display values below. They are set here once and
+; restated nowhere else: Doc 03's CELL grid and Doc 04's absolute pixel layout
+; are both authored against a true 1920x1080 canvas, and `keep` is what makes
+; that canvas honest on the 16:10 panels this game targets.
+
+config_version=5
+
+[application]
+
+config/name="Gravity Falls"
+config/features=PackedStringArray("4.4")
+
+[display]
+
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"

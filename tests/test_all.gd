@@ -12,6 +12,12 @@ extends SceneTree
 ## contract this file owes the tracker.
 
 const RuntimeHarness := preload("res://tests/harness.gd")
+const TokensScript := preload("res://autoload/tokens.gd")
+const PaletteResource := preload("res://core/palette.gd")
+const CharacterProportionsResource := preload("res://core/character_proportions.gd")
+const TubeGeometry := preload("res://core/tube.gd")
+const EyeGeometry := preload("res://core/eyes.gd")
+const WeirdnessScript := preload("res://autoload/weirdness.gd")
 
 ## Doc 01 §10's tree, which is the single authority for every res:// path in
 ## the project. A directory not on this list is a finding: either the file
@@ -94,6 +100,9 @@ func _init() -> void:
 
 	_check_display_settings(h)   # tracker 0.1
 	_check_project_structure(h)  # tracker 0.2
+	_check_tokens_and_resources(h)  # tracker 0.4
+	_check_geometry(h)              # tracker 0.5
+	_check_weirdness(h)             # tracker 0.6 / Doc 00 §12 check 36
 
 	# --- (scene) checks -----------------------------------------------------
 	# Doc 00 §12's checks 1-3, 6, 14, 34, 35 and 39 need a real scene tree and
@@ -126,6 +135,95 @@ func _check_display_settings(h) -> void:
 		ProjectSettings.get_setting("display/window/stretch/aspect"), "keep",
 		"stretch aspect"
 	)
+
+
+## Tracker 0.4 / Doc 01 §§1 and 3. Resource loading catches broken ext_resource
+## paths and class regressions before zones or character scenes depend on them.
+func _check_tokens_and_resources(h) -> void:
+	# A --script SceneTree is launched directly and does not instantiate project
+	# autoloads; assert the project registration and the constants themselves.
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/Tokens"), "*res://autoload/tokens.gd",
+		"Tokens autoload registration"
+	)
+	h.expect(TokensScript.EXPRESSION_PRESETS.has(&"worried"), "Tokens exposes expression presets")
+	var woods := load("res://resources/palettes/pal_woods.tres")
+	h.expect(woods is PaletteResource, "pal_woods.tres loads as Palette")
+	if woods is PaletteResource:
+		h.expect_eq(woods.ambient_weirdness, 0.05, "woods ambient weirdness")
+
+	var dipper := load("res://resources/proportions/prop_dipper.tres")
+	h.expect(dipper is CharacterProportionsResource, "prop_dipper.tres loads as CharacterProportions")
+	if dipper is CharacterProportionsResource:
+		var stack: float = dipper.head_diameter + dipper.segment(&"torso").x \
+			+ dipper.segment(&"leg_upper").x + dipper.segment(&"leg_lower").x \
+			+ dipper.segment(&"foot").x
+		h.expect(
+			absf(stack - dipper.height) < dipper.height * 0.05,
+			"proportion stack %f remains within 5%% of declared height %f" % [stack, dipper.height]
+		)
+
+
+## Tracker 0.5 / Doc 01 §§4–5. These checks protect geometry that otherwise
+## fails only after real hose textures are authored.
+func _check_geometry(h) -> void:
+	var capsule := TubeGeometry.capsule(100.0, 20.0, 8)
+	h.expect_eq(capsule.size(), 28, "capsule vertex count")
+	h.expect(_signed_area(capsule) > 0.0, "capsule winding is clockwise in Y-down space")
+	for point in capsule:
+		h.expect(absf(point.x) <= 10.001, "capsule respects half-width at %s" % point)
+		h.expect(point.y >= -10.001 and point.y <= 110.001, "capsule respects cap bounds at %s" % point)
+
+	var in_blend_band := 0
+	for point in capsule:
+		var t: float = point.y / 100.0
+		if t > 0.38 and t < 0.62:
+			in_blend_band += 1
+	h.expect(in_blend_band >= 4, "capsule has at least four vertices in the hose blend band")
+
+	var tapered := TubeGeometry.capsule(100.0, 20.0, 8, 16.0)
+	h.expect_eq(tapered.size(), 28, "tapered capsule vertex count")
+	h.expect(absf(tapered[0].x) > absf(tapered[tapered.size() / 2].x), "capsule tapers at the far end")
+
+	var proportions := CharacterProportionsResource.new()
+	var arm_length: float = proportions.segment(&"arm_upper").x + proportions.segment(&"arm_fore").x
+	var arm_width: float = proportions.segment(&"arm_upper").y
+	var arm_width_end: float = proportions.segment(&"arm_fore").y
+	var hose := TubeGeometry.capsule(arm_length, arm_width, 8, arm_width_end)
+	var uv := TubeGeometry.hose_uv(hose, arm_width, arm_width_end)
+	var texture_size := TubeGeometry.hose_texture_size(arm_length, arm_width, arm_width_end)
+	h.expect_eq(uv.size(), hose.size(), "hose has one UV per vertex")
+	for coordinate in uv:
+		h.expect(
+			coordinate.x >= 0.0 and coordinate.x <= texture_size.x
+				and coordinate.y >= 0.0 and coordinate.y <= texture_size.y,
+			"hose UV remains inside its texture at %s" % coordinate
+		)
+
+	var previous_fore_weight := -1.0
+	for i in range(21):
+		var weight := TubeGeometry.hose_weights(float(i) / 20.0)
+		h.expect(is_equal_approx(weight.x + weight.y, 1.0), "hose weights partition to one at t=%f" % (float(i) / 20.0))
+		h.expect(weight.y >= previous_fore_weight, "hose fore weight is monotonic")
+		previous_fore_weight = weight.y
+	h.expect_eq(TubeGeometry.hose_weights(0.0), Vector2(1.0, 0.0), "hose starts fully upper-bone")
+	h.expect_eq(TubeGeometry.hose_weights(1.0), Vector2(0.0, 1.0), "hose ends fully fore-bone")
+
+	var eye := EyeGeometry.geometry(82.0)
+	var pupil_max_offset: float = float(eye["pupil_max_offset"])
+	var pupil_radius: float = float(eye["pupil_radius"])
+	var radius: float = float(eye["radius"])
+	var offset := EyeGeometry.pupil_offset(Vector2(9.0, -4.0), pupil_max_offset)
+	h.expect(offset.length() <= pupil_max_offset + 0.001, "pupil never escapes the sclera")
+	h.expect(pupil_radius + pupil_max_offset <= radius, "pupil geometry fits inside the sclera")
+
+
+func _signed_area(points: PackedVector2Array) -> float:
+	var area := 0.0
+	for i in range(points.size()):
+		var next := points[(i + 1) % points.size()]
+		area += points[i].x * next.y - next.x * points[i].y
+	return area * 0.5
 
 
 ## Tracker 0.2 / Doc 01 §10. Walks the whole project and fails on any directory

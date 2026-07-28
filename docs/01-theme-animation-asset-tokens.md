@@ -369,8 +369,7 @@ static func capsule(length: float, width: float, seg: int = 8,
 
 	pts.append(Vector2(w0, 0.0))       # top-right
 
-	for i in range(1, shaft_segs):     # right shaft, shoulder -> wrist
-		var t := float(i) / float(shaft_segs)
+	for t in _shaft_samples(shaft_segs): # right shaft, shoulder -> wrist
 		pts.append(Vector2(lerpf(w0, w1, t), length * t))
 
 	pts.append(Vector2(w1, length))    # bottom-right
@@ -381,8 +380,8 @@ static func capsule(length: float, width: float, seg: int = 8,
 
 	pts.append(Vector2(-w1, length))   # bottom-left
 
-	for i in range(1, shaft_segs):     # left shaft, wrist -> shoulder
-		var t := 1.0 - float(i) / float(shaft_segs)
+	for i in range(_shaft_samples(shaft_segs).size() - 1, -1, -1): # left shaft, wrist -> shoulder
+		var t := _shaft_samples(shaft_segs)[i]
 		pts.append(Vector2(-lerpf(w0, w1, t), length * t))
 
 	pts.append(Vector2(-w0, 0.0))      # top-left
@@ -392,13 +391,24 @@ static func capsule(length: float, width: float, seg: int = 8,
 		pts.append(Vector2(cos(a) * w0, sin(a) * w0))
 
 	return pts
+
+## The default remains 28 vertices, but its six shaft samples deliberately put
+## three points per side inside the 0.38–0.62 weight-blend band. Uniform sixths
+## produce only one point per side at t = 0.5 and fail §11's ≥4-vertex guard.
+static func _shaft_samples(shaft_segs: int) -> PackedFloat32Array:
+	if shaft_segs == 6:
+		return PackedFloat32Array([0.16, 0.40, 0.50, 0.60, 0.84])
+	var samples := PackedFloat32Array()
+	for i in range(1, shaft_segs):
+		samples.append(float(i) / float(shaft_segs))
+	return samples
 ```
 
 A limb is **one capsule spanning both bones**, not two capsules stacked. §4.3 maps a single texture onto it.
 
 **Why the shaft is subdivided.** Without `shaft_segs` the polygon has vertices only at the two ends and in the two caps — nothing between `y = 0` and `y = length`. Since §4.2 derives each vertex's bone weight from its Y position, every vertex would resolve to `t ≤ 0` or `t ≥ 1`, `hose_weights` would return exactly `(1,0)` or `(0,1)` for all of them, and **the blend band would contain no vertices at all**. The limb would hinge as two rigid halves — the precise "hard mechanical elbow" §4.2 exists to prevent. The subdivision is what makes the hose a hose; it is not a smoothing knob and must not be lowered below 4. §11 asserts it.
 
-At `seg = 8, shaft_segs = 6` a limb is 28 vertices. The core cast plus four on-screen NPCs runs ~2,200 character vertices per frame — still negligible, and it keeps the silhouette smooth at 2× Retina scale where a 4-segment cap would visibly facet.
+At `seg = 8, shaft_segs = 6` a limb is 28 vertices, including six vertices in the blend band. The core cast plus four on-screen NPCs runs ~2,200 character vertices per frame — still negligible, and it keeps the silhouette smooth at 2× Retina scale where a 4-segment cap would visibly facet.
 
 ### 4.2 Bone weighting — the actual hose bend
 

@@ -11,6 +11,10 @@ config_version=5
 config/name="Gravity Falls"
 config/features=PackedStringArray("4.4")
 
+[autoload]
+
+Tokens="*res://autoload/tokens.gd"
+
 [display]
 
 window/size/viewport_width=1920

@@ -191,7 +191,7 @@ enum Mode { AUTO, BUBBLE, BOX }
 @export var sfx_override: StringName = &""
 ```
 
-> **Superseded — Doc 00 §8.3.** An earlier draft carried `pause_player: bool`, which set
+> **Superseded — Doc 00 §8.4.** An earlier draft carried `pause_player: bool`, which set
 > `PlayerController` to `CUTSCENE` directly. Only `RuntimeDirector` commits player state
 > (Doc 00 §14.1), so the field is removed. A line needing player lockout is authored as a
 > `CUTSCENE_REQUEST` through Doc 00 §8.2.
@@ -342,6 +342,7 @@ Seeding from the line ID keeps a given line stuttering identically every time it
 | Bill | 30 | `[cipher]` | `#FFD23F` | Slow. Menace is in the pacing |
 | Gideon | 44 | `[pulse freq=1.2]` on threats | `#7FBFE0` | Sweet cadence, wrong content |
 | Ford | 42 | — | `#6A2CE0` | |
+| Jeff | 52 | — | `#6B8F4E` | Doc 6 §2.1. Salesman warmth that drops to flat menace when refused |
 | Journal text | 55 | — | `#2B2118` | Ford's handwriting |
 
 ### 4.5 Typewriter
@@ -439,6 +440,8 @@ Left page lists collected cipher fragments with their source zone. Right page is
 The preview updating live as you scrub the Caesar shift is deliberate — it turns a lookup into a slot machine you can feel land.
 
 Solved fragments burn gold at the edges and unlock their Journal entry.
+
+**The pane validates nothing.** Live preview is pure decode and touches no state, but committing an answer writes `GameState.ciphers_solved`, so submission is a `JOURNAL_SUBMIT_REQUEST` with `kind = &"cipher"` (Doc 00 §8.3). The pane reacts to `journal_submit_committed`. Same rule for the weakness field on an incomplete entry (Doc 00 §9.2.1) — a submission can be cancelled by a same-tick hit, and the typed text survives in the field for a retry.
 
 ### 6.5 Map tab
 
@@ -596,5 +599,6 @@ func _init() -> void:
 5. `[pause]` and `[color]` are semantic and survive accessibility stripping; everything else is decorative and does not.
 6. Stutter is seeded per line ID and never re-rolls.
 7. Inventory lives in the Journal. No second inventory UI may be added.
+7a. No UI pane writes `GameState`. Player-typed answers — ciphers and weakness fields — enqueue `JOURNAL_SUBMIT_REQUEST` and render from `journal_submit_committed` (Doc 00 §8.3).
 8. The map shows position only. **No fast travel** — it would undercut Doc 3's streaming world.
 9. All text roles scale by `Settings.text_scale`; no text container is fixed-height.

@@ -213,7 +213,7 @@ Bosses **cut** rather than crossfade — the shock is the point.
 
 | ID | Boss | Chapter | Phase handling |
 |---|---|---|---|
-| `boss_gnome` | Gnomonster | 1 | Single |
+| `boss_gnome` | Gnomonster | 1 | **3 phases** via `boss_phase` (Doc 6 §7.4) |
 | `boss_gobblewonker` | Gobblewonker | 2 | Single |
 | `boss_gideonbot` | Gideon's robot | 12 | 2 phases via `dread` gate |
 | `boss_shapeshifter` | Shape Shifter | 13 | Stems shuffle on each morph |
@@ -380,6 +380,7 @@ Doc 4 §4.5 fires a blip every 3rd glyph, skipping whitespace and punctuation.
 | Wendy | 1.05 | ±0.05 | Flat, unbothered |
 | Bill | **0.62** | **±0.30** | Detuned saw, 8% chance of a reversed blip |
 | Gideon | 1.28 | **±0.03** | Sweet, *too even* — uncanny by uniformity |
+| Jeff | 1.22 | ±0.09 | Reedy square. Doc 6 §2.1 |
 | Ford | 0.88 | ±0.04 | Clipped, precise |
 | McGucket | 1.42 | ±0.18 | Cracked, thin |
 

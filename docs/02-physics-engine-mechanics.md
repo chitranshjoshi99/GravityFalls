@@ -55,7 +55,7 @@ target.y *= DEPTH_RATIO          # ← foreshortening, applied last
 Top-down 2D has no third axis, so height is faked with a single float. This one component powers jumping, floating artifacts, thrown objects, gravity anomalies, and Weirdmageddon's floating debris.
 
 ```gdscript
-# res://physics/height_body.gd
+# res://actors/player/height_body.gd
 class_name HeightBody
 extends Node
 
@@ -206,7 +206,7 @@ Pixels/second at the 1920×1080 reference canvas.
 ### 3.3 Controller
 
 ```gdscript
-# res://physics/player_controller.gd
+# res://actors/player/player_controller.gd
 class_name PlayerController
 extends CharacterBody2D
 
@@ -231,6 +231,13 @@ var surface_friction := FRICTION_GROUND
 @onready var height_body: HeightBody = $HeightBody
 @onready var stamina: Stamina = $Stamina
 
+## EVERY State value needs an arm. Doc 00 §5.1 adds four states to this enum, and
+## a state with no arm never writes `velocity` — so the body silently coasts at
+## whatever it last held while move_and_slide() keeps applying it. The worst case
+## is BLACKOUT: the invisible player body is the save/checkpoint anchor (Doc 00
+## §5.3), so it would drift away from the death site for the whole blackout.
+## There is deliberately no `_:` default — a new state must be classified here,
+## not absorbed silently.
 func _physics_process(delta: float) -> void:
 	match state:
 		State.FREE, State.JOURNAL:
@@ -239,7 +246,11 @@ func _physics_process(delta: float) -> void:
 			_move(delta, Vector2.ZERO)      # velocity preserved, no steering
 		State.HURT, State.FUMBLING:
 			_move(delta, Vector2.ZERO)
-		State.CUTSCENE:
+		State.ATTACKING:
+			_move(delta, Vector2.ZERO)      # drifts, no steering (Doc 00 §5.1)
+		State.DRIVING:
+			return                          # vehicle owns the transform entirely
+		State.CUTSCENE, State.ZONE_TRANSITION, State.BLACKOUT:
 			velocity = Vector2.ZERO
 
 	velocity += external_force * delta
@@ -301,11 +312,18 @@ The i-frame window starting at 0.05 s rather than 0 means panic-rolling *into* a
 | `attack` | Left Mouse / Ctrl | Right trigger |
 | `item_use` | Q | Left trigger |
 | `uv_light` | F | Right stick click |
-| `item_cycle` | Mouse wheel / Tab | Bumpers |
-| `scan` | Hold J + `attack` | Hold Y + RT |
+| `item_cycle` | Mouse wheel | Bumpers |
+| `item_radial` | **Tab (hold)** | **Left bumper (hold)** |
+| `scan` | **Left Shift** | **Right trigger** |
 | `pause` | Esc | Start |
 
 Every action is remappable via `InputMap` at runtime — one settings screen, spec'd in Doc 4.
+
+**`scan` is a plain action, not a chord.** An earlier draft bound it to "hold `J` + `attack`", which cannot work: `InputMap` has no chord or modifier-combination action, so `Input.is_action_pressed("scan")` requires `scan` to be its own registered action with its own events. The chord also fought itself — `J` is the `journal` toggle, so holding it means the toggle already fired on keydown, and Doc 00 §4.2 rejects `ATTACK_REQUEST` outside `FREE`, making `attack` a dead input while the Journal is open. And a chord is not remappable, contradicting the line above it.
+
+`Left Shift` is free while the Journal is open because `run` is inert at journal speed, and the right trigger is free for the same reason on a gamepad. The one binding collision that would make scanning unreachable is `scan` == `journal`; Doc 4 §7.3's remap screen rejects that pair explicitly.
+
+**Verb gating is the resolver's job, not the `InputMap`'s.** `journal`, `uv_light`, and `scan` are bound at boot like every other action, even before Dipper owns the Journal. A verb the player has not earned yet is refused at the resolver — Doc 00 §4.2 priority 11 and 12 additionally require the corresponding inventory item. Binding actions at runtime to gate a story beat would put a gameplay gate inside `Settings`, which loads from `user://settings.cfg` before `GameState` exists and survives New Game — so a stale settings file could hand a fresh playthrough the Journal.
 
 ---
 
@@ -358,13 +376,21 @@ a hitbox callback, and the fumble is counted in physics ticks rather than by a `
 timer — a timer mutates state outside the resolver, does not survive pause predictably, and
 cannot be stepped by Doc 00 §12's headless harness.
 
+**Where the Journal lives, and why the constants live somewhere else.** `Journal` is a **node on the player**, reached as `RuntimeDirector.player.journal` — never a singleton. Doc 00 §2.2's autoload table has no `Journal` row, and it must not gain one: in Godot 4 an autoload named `Journal` and a `class_name Journal` occupy the same global identifier and the engine errors on the collision, so `Journal.state` (instance) and `Journal.FUMBLE_DURATION` (constant) could never both resolve from that name.
+
+The three timings therefore live in a tiny static class, `JournalConst`, which anything may read at parse time — Doc 00 §2.4 derives its tick counts from them before any node exists. `Journal` the node holds state; `JournalConst` holds numbers. Neither holds the other's job.
+
 ```gdscript
-# res://journal/journal.gd  (excerpt)
+# res://core/journal_const.gd
+class_name JournalConst
 const FUMBLE_DURATION := 0.80
 const OPEN_TIME := 0.42
 const CLOSE_TIME := 0.30
+```
 
-const FUMBLE_TICKS := int(round(FUMBLE_DURATION / (1.0 / 60.0)))   # 48
+```gdscript
+# res://actors/player/journal.gd  (excerpt)
+const FUMBLE_TICKS := int(round(JournalConst.FUMBLE_DURATION / (1.0 / 60.0)))   # 48
 
 var _fumble_ticks_left := 0
 
@@ -411,7 +437,7 @@ Full visual spec is Doc 4's. What Doc 2 guarantees: **the world never pauses, ne
 | Progress on interrupt | **Resets to 0** |
 
 ```gdscript
-# res://journal/scanner.gd
+# res://actors/player/scanner.gd
 class_name Scanner
 extends Node2D
 
@@ -446,25 +472,35 @@ func _physics_process(delta: float) -> void:
 		scan_completed.emit(_target, entry)
 		_reset()
 
+## A scan target is ALWAYS an Area2D on the `scannable` layer — never a body.
+## Doc 3 §4.2 authors every PropScannable as an Area2D, so get_overlapping_bodies()
+## would return an empty list forever: Area2D.get_overlapping_bodies() yields
+## PhysicsBody2D only and can never yield an Area2D. An NPC that is scannable
+## carries a `scannable` Area2D as a CHILD rather than being scanned as a body,
+## so there is one target shape and no branch. `area.owner` resolves back to the
+## prop or actor that carries the metadata.
 func _best_target() -> Node2D:
 	var best: Node2D = null
 	var best_score := -1.0
-	for body in $ScanArea.get_overlapping_bodies():
-		if not body.is_in_group(&"scannable"):
+	for area in $ScanArea.get_overlapping_areas():
+		if not area.is_in_group(&"scannable"):
 			continue
-		var to: Vector2 = body.global_position - global_position
+		var subject: Node2D = area.owner as Node2D
+		if subject == null:
+			continue
+		var to: Vector2 = area.global_position - global_position
 		var dist := to.length()
 		if dist > SCAN_RANGE or dist < 1.0:
 			continue
 		var align: float = to.normalized().dot(owner.facing)
 		if align < SCAN_CONE_COS:
 			continue
-		if not _has_line_of_sight(body):
+		if not _has_line_of_sight(area):
 			continue
 		var score: float = align * (1.0 - dist / SCAN_RANGE)
 		if score > best_score:
 			best_score = score
-			best = body
+			best = subject
 	return best
 
 func _has_line_of_sight(target: Node2D) -> bool:
@@ -527,7 +563,7 @@ UV mode costs no stamina but sets `Weirdness.pulse(0.25)` while active — the w
 The show's ciphers are systemic, not per-chapter one-offs. One class, used by every chapter doc. Cipher progression per chapter is set in the Doc 6+ schedule (Caesar → Atbash → A1Z26 → Vigenère).
 
 ```gdscript
-# res://journal/cipher.gd
+# res://core/cipher.gd
 class_name Cipher
 
 static func caesar(text: String, shift: int) -> String:
@@ -616,7 +652,7 @@ Three systems cover every supernatural physical effect in the series.
 An `Area2D` writing into `external_force` on any body inside it. Doc 3 paints these into zones.
 
 ```gdscript
-# res://physics/anomaly_field.gd
+# res://world/nodes/anomaly_field.gd
 class_name AnomalyField
 extends Area2D
 
@@ -679,7 +715,7 @@ func _on_body_exited(body: Node2D) -> void:
 A ring buffer of state snapshots. Powers Blendin's time tape, the Chapter 7 loop puzzles, and Globnar.
 
 ```gdscript
-# res://physics/time_recorder.gd
+# res://core/time_recorder.gd
 class_name TimeRecorder
 extends Node
 
@@ -758,7 +794,7 @@ func _apply(s: Snapshot) -> void:
 Any prop with a `HeightBody` and `gravity_z = 0`, plus a bob:
 
 ```gdscript
-# res://physics/floating_prop.gd
+# res://world/nodes/floating_prop.gd
 extends Node2D
 
 @export var bob_amplitude := 14.0
@@ -790,7 +826,7 @@ Randomizing `_phase` per instance is the difference between "eerie floating debr
 ### 7.1 Health
 
 ```gdscript
-# res://systems/health.gd
+# res://actors/player/health.gd
 class_name Health
 extends Node
 
@@ -871,7 +907,7 @@ At zero pips: no game-over screen. Screen desaturates over 0.6 s, Dipper crumple
 | Enemies | Respawned in the current room only |
 
 ```gdscript
-# res://systems/checkpoint.gd
+# res://world/nodes/checkpoint.gd
 class_name Checkpoint
 extends Area2D
 
@@ -898,7 +934,7 @@ Checkpoint placement rule for Doc 3: every zone entrance, every boss arena door,
 ## 8. Interaction
 
 ```gdscript
-# res://systems/interactor.gd
+# res://actors/player/interactor.gd
 class_name Interactor
 extends Area2D
 
@@ -952,7 +988,7 @@ Target selection above is unchanged and still runs every physics tick. `RuntimeD
 No pathfinding. A breadcrumb queue: the companion walks the path *you already walked*, delayed. It looks natural, is impossible to get stuck, and costs nothing.
 
 ```gdscript
-# res://ai/companion_follower.gd
+# res://actors/npc/companion_follower.gd
 class_name CompanionFollower
 extends CharacterBody2D
 
@@ -1031,7 +1067,7 @@ Companion combat behavior is per-chapter and scripted — Mabel grapples, Soos b
 ## 11. Validation
 
 ```gdscript
-# res://physics/test_physics.gd — godot --headless --script res://physics/test_physics.gd
+# res://tests/test_all.gd — godot --headless --script res://tests/test_all.gd
 extends SceneTree
 
 func _init() -> void:
@@ -1058,9 +1094,9 @@ func _init() -> void:
 		Vector2(-1, -1).normalized()), "snap northwest")
 
 	# --- Fumble must fit inside i-frames, or damage chains ------------------
-	assert(Journal.FUMBLE_DURATION < Health.IFRAME_DURATION,
+	assert(JournalConst.FUMBLE_DURATION < Health.IFRAME_DURATION,
 		"fumble (%f) must be shorter than i-frames (%f) or players get chain-hit"
-		% [Journal.FUMBLE_DURATION, Health.IFRAME_DURATION])
+		% [JournalConst.FUMBLE_DURATION, Health.IFRAME_DURATION])
 
 	# --- Height body: what goes up must come down ---------------------------
 	var hb := HeightBody.new()

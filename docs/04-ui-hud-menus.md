@@ -121,7 +121,7 @@ Floats 40 px above the target's `a_head_top`, or the prop's top edge. A key badg
 ### 2.7 Contextual fade
 
 ```gdscript
-# res://ui/hud_visibility.gd
+# res://ui/hud/hud_visibility.gd
 class_name HudVisibility
 extends CanvasLayer
 
@@ -135,6 +135,7 @@ const SNAP_TIME := 0.08          ## showing is near-instant; hiding is lazy
 
 var _idle := 0.0
 var _shown := true
+var _item_changed_at := -999.0   ## set from RuntimeDirector's item_select_committed
 
 func _process(delta: float) -> void:
 	if _should_show():
@@ -145,15 +146,27 @@ func _process(delta: float) -> void:
 		if _idle >= IDLE_HIDE_DELAY:
 			_set_shown(false)
 
+## LIVE state comes from the player node, never from GameState. GameState (Doc 00
+## §9.2) is the PERSISTENCE autoload — chapter, flags, inventory, entries,
+## checkpoint — and holds no health, no stamina, and no item timestamp. Health and
+## Stamina are nodes on the player (Doc 2 §7.1, §3.1); the Journal is a node on the
+## player too (Doc 2 §5.2). Reaching for the nearest global instead of the owner is
+## how a UI doc ends up referencing three members that do not exist.
 func _should_show() -> bool:
+	var p := RuntimeDirector.player
+	if p == null:
+		return false
 	return (
-		GameState.health.current < GameState.health.max_pips   # never hide damage
-		or GameState.stamina.current < GameState.stamina.maximum
-		or CombatDirector.threat_active                        # enemy aware of player
-		or Journal.state != Journal.JournalState.CLOSED
-		or GameState.recently_changed_item(2.0)
-		or CombatDirector.boss_active                          # Doc 00 §2.3
+		p.health.current < p.health.max_pips        # never hide damage
+		or p.stamina.current < p.stamina.maximum
+		or CombatDirector.threat_active             # enemy aware of player
+		or p.journal.state != Journal.JournalState.CLOSED
+		or Time.get_ticks_msec() * 0.001 - _item_changed_at < 2.0
+		or CombatDirector.boss_active               # Doc 00 §2.3
 	)
+
+func _on_item_select_committed(_id: StringName) -> void:
+	_item_changed_at = Time.get_ticks_msec() * 0.001
 
 func _set_shown(v: bool) -> void:
 	if v == _shown:
@@ -177,7 +190,7 @@ The Journal tab and interaction prompt are exempt — they never fade, because t
 ### 3.1 Line resource
 
 ```gdscript
-# res://dialogue/dialogue_line.gd
+# res://core/dialogue_line.gd
 class_name DialogueLine
 extends Resource
 
@@ -237,13 +250,15 @@ Bubbles never require input to dismiss. They are ambient by definition.
 
 ### 3.4 Story box
 
-1824 × 300 at `y = 732`, `journal_page` background at 94% opacity over a 6 px `journal_cover` border with visible corner stitching.
+1824 wide, **bottom-anchored at `y = 1032` and growing upward**, `custom_minimum_size.y = 300`, `journal_page` background at 94% opacity over a 6 px `journal_cover` border with visible corner stitching.
+
+**The box grows; it is not a fixed 300 px window.** §1.2 promises no text container is fixed-height so 1.5× scale never clips, and this is the one box where that promise has to be kept deliberately: `resolve_mode` (§3.2) promotes to `BOX` above 90 characters with no upper bound, and chapter docs author lines well past that — Doc 6 §4.4's Stan line is 137 characters, which wraps to four lines at `text_scale = 1.5`. A fixed 216 px text area silently truncates the fourth line **at the largest accessibility setting**, which is the setting used by the people who need it. Anchoring the bottom edge and letting the box grow upward keeps the caret, the portrait, and the border in place while the text takes the room it needs.
 
 | Element | Position | Size |
 |---|---|---|
-| Portrait | left inset 24 | 240 × 240 |
+| Portrait | left inset 24, bottom-aligned | 240 × 240 |
 | Name plate | above portrait, overlapping | auto × 44 |
-| Text area | x 300 → 1780 | 216 tall |
+| Text area | x 300 → 1780 | **grows with content**, min 216 |
 | Advance indicator | bottom-right, 40 × 40 | bobbing pine-tree caret |
 
 Name plate is tinted per speaker from the Doc 1 palette. Portraits are `240 × 240` per expression.
@@ -263,7 +278,7 @@ Godot's `RichTextLabel` already ships `[shake]`, `[wave]`, `[tornado]`, `[rainbo
 Per-character size jitter, slight rotation, and a rare glyph flicker. This is what makes his dialogue feel like it's being transmitted rather than spoken.
 
 ```gdscript
-# res://ui/rich_text_cipher.gd
+# res://ui/dialogue/rich_text_cipher.gd
 class_name RichTextCipher
 extends RichTextEffect
 
@@ -299,7 +314,7 @@ Scaling via `fx.transform` pivots at the glyph origin, which shifts letters slig
 A **text transform**, not a visual effect: it rewrites the string before the typewriter sees it, so the stutter is heard in the reveal rhythm rather than merely seen.
 
 ```gdscript
-# res://dialogue/stutter.gd
+# res://ui/dialogue/stutter.gd
 class_name Stutter
 
 const STUTTER_CHANCE := 0.22
@@ -378,7 +393,7 @@ Not optional polish. Two of the four requested character quirks — Bill's jitte
 ### 5.2 Tag stripping
 
 ```gdscript
-# res://ui/text_accessibility.gd
+# res://ui/dialogue/text_accessibility.gd
 class_name TextAccessibility
 
 const FX_TAGS := [
@@ -431,7 +446,7 @@ Leather tabs down the right edge, 5 tabs × 148 px. `Q`/`E` or bumpers cycle; nu
 
 4-column grid, 168 px slots, 16 px gutter. Icon, count badge, and a gold corner fold on the active item. Selecting a slot shows a description panel below, written in Ford's voice where the item is anomalous and Stan's where it's merchandise.
 
-**Radial quick-select.** Hold `item_cycle` → 8-segment radial at screen centre, 280 px radius. Direction selects; release commits. **The world keeps running** — no slow-motion, no pause. Consistent with the Journal, and it keeps item swapping a real mid-fight decision.
+**Radial quick-select.** Hold `item_radial` → 8-segment radial at screen centre, 280 px radius. (`item_radial` is its own action — `Tab` / gamepad `Left bumper` held. It cannot share `item_cycle`, which Doc 2 §3.5 binds partly to the mouse wheel, and a wheel notch cannot be held.) Direction selects; release commits. **The world keeps running** — no slow-motion, no pause. Consistent with the Journal, and it keeps item swapping a real mid-fight decision.
 
 ### 6.4 Ciphers tab
 
@@ -441,7 +456,7 @@ The preview updating live as you scrub the Caesar shift is deliberate — it tur
 
 Solved fragments burn gold at the edges and unlock their Journal entry.
 
-**The pane validates nothing.** Live preview is pure decode and touches no state, but committing an answer writes `GameState.ciphers_solved`, so submission is a `JOURNAL_SUBMIT_REQUEST` with `kind = &"cipher"` (Doc 00 §8.3). The pane reacts to `journal_submit_committed`. Same rule for the weakness field on an incomplete entry (Doc 00 §9.2.1) — a submission can be cancelled by a same-tick hit, and the typed text survives in the field for a retry.
+**The pane validates nothing.** Live preview is pure decode and touches no state, but committing an answer writes `GameState.data.ciphers_solved`, so submission is a `JOURNAL_SUBMIT_REQUEST` with `kind = &"cipher"` (Doc 00 §8.3). The pane reacts to `journal_submit_committed`. Same rule for the weakness field on an incomplete entry (Doc 00 §9.2.1) — a submission can be cancelled by a same-tick hit, and the typed text survives in the field for a retry.
 
 ### 6.5 Map tab
 
@@ -533,7 +548,7 @@ Placeholders: fonts fall back to Godot's default; all frames render as Doc 1 pal
 ## 10. Validation
 
 ```gdscript
-# res://ui/test_ui.gd — godot --headless --script res://ui/test_ui.gd
+# res://tests/test_all.gd — godot --headless --script res://tests/test_all.gd
 extends SceneTree
 
 func _init() -> void:

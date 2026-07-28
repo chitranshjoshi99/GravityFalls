@@ -10,8 +10,8 @@
 | Decision | Value |
 |---|---|
 | Engine | Godot 4.x, GDScript |
-| Export targets | macOS native `.app`, Web (HTML5) for Itch.io |
-| Canvas | 1920×1080, `stretch_mode = canvas_items`, `stretch_aspect = expand` |
+| Export targets | **macOS native `.app` is the primary target.** Web (HTML5) for Itch.io is **best-effort** — see the target note below |
+| Canvas | 1920×1080, `stretch_mode = canvas_items`, `stretch_aspect = **keep**` |
 | Character rendering | `Skeleton2D` cutout rigs, `Polygon2D` parts with bone weights |
 | Combat | Real-time action |
 | World | Progressive hub-and-spoke → semi-open by Act IV |
@@ -20,7 +20,13 @@
 | Global FX | Single-uniform `weirdness` palette-ramp shader |
 | Token format | `Resource` (`.tres`) + `Tokens` autoload of typed constants |
 
-**Authoring resolution rule:** all character and prop art is authored at **2× reference scale** and imported at `scale = 0.5`. Retina MacBook displays render the 1920×1080 canvas at up to 2880×1800; 2× source keeps vector line work crisp under that upscale without shipping 4× textures to the web build.
+**Target note.** macOS native is the target every decision is made for. The web export stays a build goal but is **best-effort**: where a design choice would have to be compromised to make HTML5 work, macOS wins and the web export degrades or is dropped. Every constraint the web target imposed is kept anyway on its own merits — baked-not-streamed audio, a texture budget, no assumption of free background threading — because each is good practice for the native build too. Web-specific caveats are marked **(web)** wherever they appear and are notes, not blockers.
+
+**Why `stretch_aspect = keep`.** Every MacBook panel is 16:10 (1440×900, 2560×1600, 3024×1964). Under `expand` the viewport would resolve to roughly 1920×1200 and the player would see ~120 px more world above and below than this document, Doc 3's `CELL` grid, and Doc 4's absolute pixel layout are authored against — meaning the visible world size, the HUD's distance from the screen edge, and how much of a zone the camera shows at a seam would all differ per display. `keep` letterboxes to a true 16:9 on every machine, which makes `CELL = 1920×1080` honest, Doc 4's fixed coordinates correct, and Doc 3's `TileGround` sizing exact. The black bars are the price and they are worth it.
+
+**Authoring resolution rule:** all character and prop art is authored at **2× reference scale**. Retina MacBook displays render the 1920×1080 canvas at up to 2880×1800; 2× source keeps vector line work crisp under that upscale without shipping 4× textures to the web build.
+
+**How 2× art meets 1× geometry.** `Polygon2D` has no import-time scale — the knob is `Polygon2D.texture_scale`. Since §4.3's `hose_uv()` computes UVs in *texture pixels* from 1× reference geometry, every textured `Polygon2D` sets **`texture_scale = Vector2(0.5, 0.5)`** so those 1×-derived UVs address the full 2× image. Miss this and the UVs sample the top-left quarter of every texture. §11 pins the two scales together with an assert rather than leaving it to this paragraph.
 
 ---
 
@@ -95,7 +101,7 @@ Never used in Palette A/B zones at full strength. These are *intrusions* — the
 ### 1.5 `Palette` resource
 
 ```gdscript
-# res://tokens/palette.gd
+# res://core/palette.gd
 class_name Palette
 extends Resource
 
@@ -196,7 +202,7 @@ void fragment() {
 ### 2.1 `Weirdness` autoload
 
 ```gdscript
-# res://tokens/weirdness.gd  — Autoload singleton "Weirdness"
+# res://autoload/weirdness.gd  — Autoload singleton "Weirdness"
 extends Node
 
 signal level_changed(value: float)
@@ -208,13 +214,25 @@ var _event_level: float = 0.0
 var _mat: ShaderMaterial
 var _tween: Tween
 
-## Effective level is the stronger of the zone baseline and any active event.
-var level: float:
+## Where the tween is HEADED — the stronger of the zone baseline and any active
+## event. This is a target, not a value anything should render or mix against.
+var target_level: float:
 	get: return maxf(_zone_floor, _event_level)
+
+## Where the tween IS. THIS is the number every system reads: the shader, the
+## audio stems, the bus sends, the whisper gain, everything. Set only in _apply().
+##
+## The distinction is load-bearing. `target_level` snaps the instant a pulse is
+## requested; `applied` eases toward it over the tween's duration. If visuals
+## follow the smooth one and audio reads the snapped one, "one float runs the
+## supernatural" quietly becomes two floats on two curves — most visibly out of
+## step at exactly the authored moments that matter (Doc 6 §5's metal tree, the
+## Journal pickup, the Act 0 → Act 1 drop). One writer, one value, one curve.
+var applied: float = 0.0
 
 func bind(mat: ShaderMaterial) -> void:
 	_mat = mat
-	_apply(level)
+	_apply(target_level)
 
 ## Called by ZoneManager.activate_zone() only (Doc 00 §7.2). Persistent until the
 ## next zone. PaletteRegion applies colors; it must not touch the grade, or a
@@ -235,20 +253,23 @@ func release(duration: float = DEFAULT_FADE) -> void:
 func _retween(duration: float) -> void:
 	if _tween and _tween.is_running():
 		_tween.kill()
-	var target := level
 	_tween = create_tween().set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	_tween.tween_method(_apply, _current(), target, duration)
-
-func _current() -> float:
-	return _mat.get_shader_parameter("weirdness") if _mat else 0.0
+	_tween.tween_method(_apply, applied, target_level, duration)
 
 func _apply(v: float) -> void:
+	applied = v
 	if _mat:
 		_mat.set_shader_parameter("weirdness", v)
 	level_changed.emit(v)
 ```
 
-**Web export note:** `hint_screen_texture` requires a screen-reading backbuffer. On the HTML5 target this forces a copy each frame. Budget it: the grade `ColorRect` lives on a single `CanvasLayer` at layer 100 and is set `visible = false` whenever `level < 0.01`, skipping the backbuffer copy entirely in the ~60% of gameplay that sits at zero weirdness.
+**`Weirdness` is presentation state, and it is the one system with no resolver requirement.** Any system may call `pulse()` / `release()` directly from anywhere — a proximity trigger, an item pickup, a boss phase, a cutscene. It already clamps, already tweens, already reconciles floor against event, and nothing it holds can corrupt a save or desync gameplay. Routing it through `RuntimeDirector` would buy a rule and cost a round trip. `set_zone_floor()` is the exception: that one is `ZoneManager.activate_zone()`'s alone (Doc 00 §7.2), because it is part of the zone commit. `PaletteRegion` applies colors only and must never touch the grade, or a streamed neighbour's `_ready()` would change the grade of the zone you are standing in.
+
+**Backbuffer budget.** `hint_screen_texture` requires a screen-reading backbuffer — a full-screen copy each frame, and the single largest per-frame cost this design introduces (worse on the web target, but real on native too).
+
+**There is exactly one grade `ColorRect` in the entire game.** It lives on `world_root` (Doc 00 §3.2), on its own `CanvasLayer` at layer 100, and `SessionDirector.begin_session()` is what calls `Weirdness.bind()` on it. It is **not** part of any zone scene: Doc 3 keeps 2–3 zones resident, so a per-zone grade would stack two or three chained backbuffer copies while `Weirdness` drove only whichever one it happened to bind — the others frozen at their default. Doc 00 §12 asserts that exactly one node in the tree carries the weirdness shader.
+
+The copy is skipped by setting `visible = false` whenever `level < 0.06`. **Note the threshold is 0.06, not 0.01** — §1.5's zone table gives almost every zone a nonzero `ambient_weirdness` floor (woods 0.05, town 0.02, lake 0.05), and `activate_zone()` applies it on entry, so a 0.01 threshold would never fire anywhere outside the Mystery Shack interior and the optimization would be decorative. Below 0.06 the grade is not perceptible; the zone floor is applied as a flat `CanvasModulate` tint instead. That keeps the cheap path real for most of Act I — which is most of Chapter 1.
 
 ---
 
@@ -292,7 +313,7 @@ These are **bone lengths, not art pieces.** The skeleton keeps two bones per lim
 ### 3.4 `CharacterProportions` resource
 
 ```gdscript
-# res://tokens/character_proportions.gd
+# res://core/character_proportions.gd
 class_name CharacterProportions
 extends Resource
 
@@ -331,7 +352,7 @@ Rubber-hose limbs have **constant width along their length and fully rounded cap
 ### 4.1 Capsule generation
 
 ```gdscript
-# res://tokens/tube.gd
+# res://core/tube.gd
 class_name Tube
 
 ## Vertical capsule spanning a WHOLE limb (shoulder to wrist, hip to ankle).
@@ -339,13 +360,19 @@ class_name Tube
 ## Godot 2D is Y-down, so +Y is "away from the joint."
 ## `width_end` defaults to `width` (constant hose); pass a smaller value for the
 ## slight taper §3.2 specifies toward the wrist/ankle.
+## `shaft_segs` is load-bearing, not smoothing. See the note below §4.2.
 static func capsule(length: float, width: float, seg: int = 8,
-		width_end: float = -1.0) -> PackedVector2Array:
+		width_end: float = -1.0, shaft_segs: int = 6) -> PackedVector2Array:
 	var w0 := width * 0.5
 	var w1 := (width if width_end < 0.0 else width_end) * 0.5
 	var pts := PackedVector2Array()
 
 	pts.append(Vector2(w0, 0.0))       # top-right
+
+	for i in range(1, shaft_segs):     # right shaft, shoulder -> wrist
+		var t := float(i) / float(shaft_segs)
+		pts.append(Vector2(lerpf(w0, w1, t), length * t))
+
 	pts.append(Vector2(w1, length))    # bottom-right
 
 	for i in range(1, seg):            # bottom cap, radius w1, right -> left
@@ -353,6 +380,11 @@ static func capsule(length: float, width: float, seg: int = 8,
 		pts.append(Vector2(cos(a) * w1, length + sin(a) * w1))
 
 	pts.append(Vector2(-w1, length))   # bottom-left
+
+	for i in range(1, shaft_segs):     # left shaft, wrist -> shoulder
+		var t := 1.0 - float(i) / float(shaft_segs)
+		pts.append(Vector2(-lerpf(w0, w1, t), length * t))
+
 	pts.append(Vector2(-w0, 0.0))      # top-left
 
 	for i in range(1, seg):            # top cap, radius w0, left -> right
@@ -364,7 +396,9 @@ static func capsule(length: float, width: float, seg: int = 8,
 
 A limb is **one capsule spanning both bones**, not two capsules stacked. §4.3 maps a single texture onto it.
 
-At `seg = 8` a limb is 18 vertices. The core cast plus four on-screen NPCs runs ~1,400 character vertices per frame — negligible, and it keeps the silhouette smooth at 2× Retina scale where a 4-segment cap would visibly facet.
+**Why the shaft is subdivided.** Without `shaft_segs` the polygon has vertices only at the two ends and in the two caps — nothing between `y = 0` and `y = length`. Since §4.2 derives each vertex's bone weight from its Y position, every vertex would resolve to `t ≤ 0` or `t ≥ 1`, `hose_weights` would return exactly `(1,0)` or `(0,1)` for all of them, and **the blend band would contain no vertices at all**. The limb would hinge as two rigid halves — the precise "hard mechanical elbow" §4.2 exists to prevent. The subdivision is what makes the hose a hose; it is not a smoothing knob and must not be lowered below 4. §11 asserts it.
+
+At `seg = 8, shaft_segs = 6` a limb is 28 vertices. The core cast plus four on-screen NPCs runs ~2,200 character vertices per frame — still negligible, and it keeps the silhouette smooth at 2× Retina scale where a 4-segment cap would visibly facet.
 
 ### 4.2 Bone weighting — the actual hose bend
 
@@ -445,7 +479,7 @@ The signature feature. Two large circles that touch or slightly overlap, reading
 | Outline width | `0.055 · R`, min 2 px | 2 px |
 
 ```gdscript
-# res://tokens/eyes.gd
+# res://core/eyes.gd
 class_name Eyes
 
 const RADIUS_RATIO   := 0.21
@@ -516,13 +550,15 @@ CharacterRoot (Node2D)          ← origin at ground contact, feet-centered
 │       │   └── b_arm_r_upper → b_arm_r_fore → b_hand_r
 │       ├── b_leg_l_upper → b_leg_l_lower → b_foot_l
 │       └── b_leg_r_upper → b_leg_r_lower → b_foot_r
-├── Parts (Node2D)              ← all Polygon2D geometry, Y-sorted internally
+├── Parts (Node2D)              ← all Polygon2D geometry, y_sort_enabled = FALSE
 └── Anchors (Node2D)
 ```
 
 ### 6.2 Draw order within `Parts`
 
-Fixed `z_index` per part. Front-facing is the default; side-facing swaps the two arm groups.
+Fixed `z_index` per part, and **this table is the sole authority inside a character**. `Parts` must have `y_sort_enabled = false`: Y-sorting it as well would be a second, competing sort over the same children, and a swinging arm whose polygon origin crossed the torso's Y would re-sort mid-animation — intermittent limb pop-through during `walk` and `run`, the classic cutout artifact. Y-sorting operates at the *character* level only, keyed off `CharacterRoot`'s ground origin (Doc 2 §1.3, Doc 3 §2.1).
+
+Front-facing is the default; side-facing swaps the two arm groups.
 
 | `z_index` | Part |
 |---|---|
@@ -668,7 +704,7 @@ Flat fills tuned so the placeholder silhouette still reads as the right characte
 
 **This is the section to hand to whoever draws the art.** Everything below is a PNG the framework has a hook waiting for. Nothing else in this document requires external files.
 
-**Per core character — 16 parts.** Drop into `res://art/characters/<name>/`, authored at 2× the §3.3 dimensions, pivots per §8.1.
+**Per core character — 16 parts.** Drop into `res://assets/characters/<name>/`, authored at 2× the §3.3 dimensions, pivots per §8.1.
 
 **Limbs are four files, not eight.** Each arm and leg is a *single* continuous hose texture (§4.3), drawn straight and unbent, delivered at exactly the listed size with its 1 px transparent margin. Do not supply separate upper/forearm or thigh/shin pieces — they cannot be made seam-free across the weight-blend band, and their UVs would not map.
 
@@ -704,31 +740,72 @@ Dimensions below are Dipper's. For any other character, compute with `Tube.hose_
 
 ---
 
-## 10. File layout
+## 10. Project structure — locked, and this document owns it
+
+**This tree is the single authority for every `res://` path in Docs 00–25.** No other document invents a directory; a path appearing anywhere else must match this tree or this tree gets amended. Without one authority, each build session invents its own layout and nothing stays findable — which is how `dipper.tscn` briefly had two homes.
 
 ```
 res://
-├── tokens/
-│   ├── tokens.gd                    # Autoload "Tokens" — constants, expression presets
-│   ├── weirdness.gd                 # Autoload "Weirdness"
-│   ├── palette.gd                   # class_name Palette
-│   ├── character_proportions.gd     # class_name CharacterProportions
-│   ├── tube.gd                      # class_name Tube
-│   ├── eyes.gd                      # class_name Eyes
-│   ├── palettes/                    # pal_woods.tres, pal_shack_interior.tres, ...
-│   └── proportions/                 # prop_dipper.tres, prop_mabel.tres, ...
-├── shaders/
-│   └── weirdness.gdshader
-├── rigs/
-│   ├── rig_humanoid.tscn            # Base scene — skeleton, parts, anchors, animations
-│   ├── eye_pair.tscn                # _draw()-based, §5
-│   ├── dipper.tscn                  # inherits rig_humanoid, binds prop_dipper.tres
-│   ├── mabel.tscn  stan.tscn  soos.tscn  wendy.tscn
-│   └── npc_template.tscn
-└── art/
-    ├── characters/<name>/           # ► your PNGs land here
-    └── fx/
+├── autoload/                        # exactly the scripts registered as Autoloads (Doc 00 §2.2)
+│   ├── tokens.gd  weirdness.gd  settings.gd  game_state.gd
+│   ├── runtime_events.gd  audio_director.gd  combat_director.gd
+│   ├── cutscene_director.gd  transition_director.gd
+│   ├── zone_manager.gd  session_director.gd  runtime_director.gd
+├── core/                            # class_name scripts: no scene, no Autoload
+│   ├── tube.gd  eyes.gd  cipher.gd  stem_rack.gd  journal_const.gd
+│   ├── runtime_event.gd  save_data.gd  journal_db.gd
+│   ├── palette.gd  character_proportions.gd  zone_def.gd  journal_entry.gd
+├── actors/
+│   ├── rig_humanoid.tscn / .gd      # inherited base — every character inherits this
+│   ├── eye_pair.tscn / .gd          # _draw()-based, §5
+│   ├── player/
+│   │   ├── dipper.tscn              # inherits rig_humanoid, binds prop_dipper.tres
+│   │   ├── player_controller.gd  health.gd  stamina.gd  height_body.gd
+│   │   └── interactor.gd  scanner.gd  journal.gd
+│   ├── npc/  mabel.tscn  stan.tscn  soos.tscn  wendy.tscn
+│   │          npc_template.tscn  companion_follower.gd
+│   ├── enemy/  gnome.tscn  gnomonster.tscn
+│   └── vehicle/  golf_cart.tscn / .gd
+├── world/
+│   ├── world_root.tscn              # parallax + THE single WeirdnessGrade (§2.1)
+│   ├── zones/                       # one .tscn per BUILT zone; stem == ZoneDef.id
+│   ├── nodes/                       # the zone-authoring node vocabulary
+│   │   ├── zone_boundary.gd  door_boundary.gd  zone_activation_volume.gd
+│   │   ├── seam_blocker.gd  checkpoint.gd  secret_trigger.gd  anomaly_field.gd
+│   │   └── overhead_fade.gd  palette_region.gd  prop_interactable.gd  prop_scannable.gd
+│   └── tilesets/  gf_terrain.tres
+├── ui/
+│   ├── hud/       hud.tscn  health_pips.gd  stamina_ribbon.gd  item_slot.gd
+│   │              interact_prompt.gd  scan_ring.gd  hud_visibility.gd
+│   ├── journal/   journal_ui.tscn  tab_entries.gd  tab_items.gd  tab_ciphers.gd
+│   ├── dialogue/  dialogue_box.tscn  speech_bubble.tscn  typewriter.gd
+│   │              stutter.gd  rich_text_cipher.gd  text_accessibility.gd
+│   ├── menus/     main_menu.tscn  pause_menu.tscn  settings_menu.tscn  chapter_card.tscn
+│   └── gf_theme.tres
+├── chapters/
+│   └── ch01/      ch01_director.gd  ch01_dialogue.tres  ch01_boss.gd
+├── resources/                       # authored .tres, one subdir per class it instances
+│   ├── palettes/     pal_woods.tres  pal_shack_interior.tres  ...
+│   ├── proportions/  prop_dipper.tres  prop_mabel.tres  ...
+│   ├── zones/        z_shack_ext.tres  ...            (ZoneDef)
+│   └── journal/      entry_welcome.tres  entry_gnomes.tres  ...
+├── assets/                          # ► supplied art & audio. No code, ever.
+│   ├── characters/<name>/  fx/  props/  tiles/  ui/  fonts/
+│   └── audio/  bgm/  sfx/  blips/   # baked placeholder WAVs live here too
+├── shaders/  weirdness.gdshader  uv_reveal.gdshader
+└── tests/    test_all.gd  harness.gd
+
+tools/                               # OUTSIDE res:// — never shipped, never run at boot
+└── bake_placeholders.gd             # Doc 5 §7.1
 ```
+
+**Naming.** Files are `snake_case.gd` / `.tscn` / `.tres`; symbols are `PascalCase` for `class_name` and Autoload names. A scene and its root script share a stem (`journal_ui.tscn` ↔ `journal_ui.gd`); a script with no scene has a `class_name` and lives in `core/`. **Zone triple-lock:** scene stem == `.tres` stem == `ZoneDef.id`, asserted in `test_all.gd` — one line that catches a whole class of silent registry drift. Id prefixes stay as the docs already set them: `z_` exterior, `int_` interior, `sp_` spawn marker, `cp_` checkpoint, `bgm_`/`boss_` audio, `entry_` journal, `pal_` palette, `prop_`/`npc_`/`sigil_`/`uv_` world nodes. Save-flag prefixes are Doc 00 §9.2's `ch<NN>_` / `zone_` / `sys_` / `npc_`.
+
+**Placement rule** — one line a future session applies to any new file:
+
+> A script goes where the thing it drives lives: beside its scene if it has one, in `core/` if it is a `class_name` with no scene, in `autoload/` if it is registered as an Autoload. Authored `.tres` goes in `resources/<class>/`. Anything an artist or composer supplies goes in `assets/`. Anything that exists for exactly one chapter goes in `chapters/ch<NN>/`, and nothing outside that folder may name it.
+
+**Create no folder before its first file.** `chapters/ch02/` does not exist until Chapter 2 is written; an empty directory is speculative scaffolding. Add `tests/` and `tools/` to the export filter on day one.
 
 `rig_humanoid.tscn` is an **inherited scene** base. Every character scene inherits it, overriding only the `CharacterProportions` resource and part textures. A change to the walk cycle or the hose blend band propagates to all 30+ characters at once.
 
@@ -739,21 +816,34 @@ res://
 One runnable check for the non-trivial geometry — capsule winding, weight blending, and eye clamping are exactly the things that fail silently and look subtly wrong for hours.
 
 ```gdscript
-# res://tokens/test_tokens.gd  — run headless: godot --headless --script res://tokens/test_tokens.gd
+# res://tests/test_all.gd  — run headless: godot --headless --script res://tests/test_all.gd
 extends SceneTree
 
 func _init() -> void:
 	# Capsule: closed, correct vertex count, respects width bounds.
 	var c := Tube.capsule(100.0, 20.0, 8)
-	assert(c.size() == 18, "capsule vertex count changed: %d" % c.size())
+	assert(c.size() == 28, "capsule vertex count changed: %d" % c.size())
 	for p in c:
 		assert(absf(p.x) <= 10.001, "capsule exceeds half-width at %s" % p)
 		assert(p.y >= -10.001 and p.y <= 110.001, "capsule exceeds cap bounds at %s" % p)
 
-	# Tapered capsule: still closed, still 18 verts, narrower at the wrist end.
+	# THE ONE THAT MATTERS: the §4.2 blend band must actually contain vertices.
+	# With no shaft subdivision every vertex lands at t<=0 or t>=1, hose_weights
+	# returns (1,0) or (0,1) for all of them, and the limb hinges as two rigid
+	# halves instead of bending. That failure is INVISIBLE with placeholder flat
+	# fills and only shows up when the first hose PNG lands — long after the
+	# Doc 6 §13 gate has passed. This assert is what catches it now.
+	var in_band := 0
+	for p in c:
+		var t := p.y / 100.0
+		if t > 0.38 and t < 0.62:
+			in_band += 1
+	assert(in_band >= 4, "blend band is empty (%d verts) — limbs will hinge, not bend" % in_band)
+
+	# Tapered capsule: still closed, still 28 verts, narrower at the wrist end.
 	var tap := Tube.capsule(100.0, 20.0, 8, 16.0)
-	assert(tap.size() == 18, "tapered capsule vertex count changed")
-	assert(absf(tap[0].x) > absf(tap[1].x), "taper must narrow toward the far end")
+	assert(tap.size() == 28, "tapered capsule vertex count changed")
+	assert(absf(tap[0].x) > absf(tap[tap.size() / 2].x), "taper must narrow toward the far end")
 
 	# Hose UVs: every vertex must land inside the texture, margin included.
 	var p := CharacterProportions.new()
@@ -801,7 +891,7 @@ What Docs 2–5 and every chapter doc are entitled to assume:
 1. `Tokens`, `Weirdness` autoloads exist and are safe to call from anywhere.
 2. Character origin = ground contact, feet-centered. Y-sort and collision key off it.
 3. `a_hand_r`, `a_hand_l`, `a_head_top`, `a_face`, `a_back`, `a_chest`, `a_ground`, `a_interact` exist on every humanoid rig.
-4. `Weirdness.level` is the single float that supernatural intensity is expressed in — visuals, audio, and physics all read it. Nothing invents a parallel scale.
+4. **`Weirdness.applied` is the single float that supernatural intensity is expressed in** — visuals, audio, and physics all read *that* one. Nothing invents a parallel scale, and nothing reads `target_level`, which is only where the tween is headed. `Weirdness` is presentation state: `pulse()` and `release()` may be called directly from anywhere, but `set_zone_floor()` belongs to `ZoneManager.activate_zone()` alone.
 5. Every zone has a `Palette` resource with an `ambient_weirdness` floor.
 6. Animation names in §7 exist on every humanoid; `talk` and `journal_settle` layer independently.
 7. No art asset is a hard dependency. Placeholders render everything.

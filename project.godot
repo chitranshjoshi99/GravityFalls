@@ -20,6 +20,11 @@ Weirdness="*res://autoload/weirdness.gd"
 Settings="*res://autoload/settings.gd"
 GameState="*res://autoload/game_state.gd"
 RuntimeEvents="*res://autoload/runtime_events.gd"
+; Doc 00 §2.2 places RuntimeDirector twelfth and LAST. Rows 0.11, 0.12 and 2.3
+; insert AudioDirector, Combat/Cutscene/TransitionDirector, ZoneManager and
+; SessionDirector ABOVE this line, never below it: the resolver reaches for all
+; of them, and an autoload may only reference autoloads registered above it.
+RuntimeDirector="*res://autoload/runtime_director.gd"
 
 [display]
 

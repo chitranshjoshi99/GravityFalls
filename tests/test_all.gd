@@ -116,6 +116,7 @@ func _init() -> void:
 	_check_settings(h)              # tracker 0.7
 	_check_save_data(h)             # tracker 0.8 / Doc 00 §12 checks 32–33
 	_check_runtime_events(h)        # tracker 0.9 / Doc 00 §12 check 16
+	_check_runtime_director(h)      # tracker 0.10 / Doc 00 §12 checks 15, 4, 17, 20
 
 	# --- (scene) checks -----------------------------------------------------
 	# Doc 00 §12's checks 1-3, 6, 14, 34, 35 and 39 need a real scene tree and
@@ -153,8 +154,9 @@ func _check_display_settings(h) -> void:
 ## Tracker 0.4 / Doc 01 §§1 and 3. Resource loading catches broken ext_resource
 ## paths and class regressions before zones or character scenes depend on them.
 func _check_tokens_and_resources(h) -> void:
-	# A --script SceneTree is launched directly and does not instantiate project
-	# autoloads; assert the project registration and the constants themselves.
+	# A --script SceneTree does instantiate project autoloads, but this file
+	# compiles before they exist, so the global identifier `Tokens` is not
+	# usable here. Assert the project registration and the constants themselves.
 	h.expect_eq(
 		ProjectSettings.get_setting("autoload/Tokens"), "*res://autoload/tokens.gd",
 		"Tokens autoload registration"
@@ -260,8 +262,10 @@ func _check_weirdness(h) -> void:
 		# Row 0.7's reduce_flashing clamps this, so it cannot become a literal.
 		h.expect(uniforms.has("aberration_px"), "shader keeps aberration_px a uniform")
 
-	# create_tween() needs a node in the tree, and a --script SceneTree does not
-	# instantiate project autoloads, so the check builds its own instance.
+	# create_tween() needs a node in the tree, hence the add_child(). A --script
+	# SceneTree does instantiate project autoloads, so the live Weirdness node
+	# exists — but this check drives the level hard and must not leave the
+	# shipped singleton mid-tween, so it builds its own instance.
 	var w: Node = WeirdnessScript.new()
 	root.add_child(w)
 
@@ -530,6 +534,159 @@ func _check_runtime_events(h) -> void:
 		h.expect_eq(dodges[0].order, 0, "order resets on swap")
 
 	q.free()
+
+
+## Tracker 0.10 / Doc 00 §12 checks 15, 4, 17 and 20 — the resolver itself.
+##
+## Every check below drives the LIVE `RuntimeDirector` autoload through the
+## §12 harness. The point of §12's design is that `_resolve()` is a pure
+## function of (queue, state): no frame is awaited, no physics server runs, and
+## no tween, fade or `TransitionDirector` exists anywhere in the process. If a
+## gameplay state change ever came to depend on an animation completing, these
+## checks would hang or fail rather than quietly pass in the editor and break
+## on a slow machine.
+func _check_runtime_director(h) -> void:
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/RuntimeDirector"),
+		"*res://autoload/runtime_director.gd",
+		"RuntimeDirector autoload registration"
+	)
+	# Reached by node path, not preload: runtime_director.gd names the
+	# `RuntimeEvents` and `GameState` globals, which do not exist at the moment
+	# this file compiles, so a preload const here would fail the whole suite.
+	var d: Node = root.get_node_or_null(^"RuntimeDirector")
+	if not h.expect(d != null, "RuntimeDirector autoload is in the tree"):
+		return
+
+	# --- check 15: the resolver runs LAST among gameplay scripts -------------
+	# Godot adds autoloads as root's first children, so the default priority of 0
+	# would resolve this BEFORE every body has moved and every trigger has
+	# published — the exact opposite of §4.1's frame contract, and a bug that
+	# shows up as one-frame-stale reads rather than as a crash. Read off the live
+	# node, so the assertion covers the value that actually ships rather than the
+	# constant's source text.
+	h.expect_eq(d.process_physics_priority, 100, "RuntimeDirector physics priority")
+	h.expect(
+		d.process_physics_priority > 0,
+		"resolver runs after every gameplay node (Doc 00 §2.2, default 0)"
+	)
+	h.expect(
+		d.process_physics_priority > 50,
+		"resolver runs after CombatDirector (Doc 00 §2.2, 50)"
+	)
+	h.expect(
+		d.process_physics_priority < 110,
+		"resolver runs before ZoneManager (Doc 00 §2.2, 110) — residency streams after the commit"
+	)
+
+	# --- check 4: damage and E in the same tick ------------------------------
+	# §4.4's first row. The bug this catches is an interaction that commits
+	# alongside the hit that was supposed to cancel it: the player takes damage
+	# AND opens the chest, which reads as an input that "went through anyway".
+	h.reset(d)
+	h.enqueue(RuntimeEventRecord.Type.INTERACT_REQUEST, {&"target": h.stub_interactable})
+	h.enqueue(RuntimeEventRecord.Type.DAMAGE, {&"amount": 1})
+	h.step()
+	h.expect_eq(h.health.current, h.health.max_pips - 1, "same-tick damage applies exactly once")
+	h.expect_eq(h.stub_interactable.interact_calls, 0, "same-tick damage cancels the interaction")
+	# Two independent mechanisms enforce that cancellation today — `_try_interact`
+	# refuses on `_damage_committed`, and the hit has already moved the player out
+	# of `FREE`. Both are asserted, because rows 1.5 and 4.1 bring i-frames and
+	# HURT recovery that could remove either one without touching the other.
+	h.expect_eq(h.player.state, PlayerController.State.HURT, "the hit leaves the player in HURT")
+
+	# --- check 17: a seam is not a transition, and not a shield --------------
+	# The single most load-bearing distinction in §4.5. If a seamless crossing
+	# ever took a lock, every open-world zone edge would flicker control away for
+	# 0.7 s; if it ever ended the tick, walking across a seam would grant
+	# invulnerability to anything on the far side.
+	h.reset(d)
+	h.enqueue(RuntimeEventRecord.Type.ZONE_ACTIVATION_REQUEST, {&"to": &"z_woods"})
+	h.step()
+	h.expect_eq(h.zone.current_zone, &"z_woods", "a seamless activation commits the zone")
+	h.expect_eq(h.zone.activate_calls, 1, "a seamless activation calls activate_zone exactly once")
+	h.expect_eq(d._lock_ticks, 0, "a seamless activation takes no transition lock")
+	h.expect_eq(h.player.state, PlayerController.State.FREE, "a seamless activation leaves the player FREE")
+
+	h.reset(d)
+	h.enqueue(RuntimeEventRecord.Type.ZONE_ACTIVATION_REQUEST, {&"to": &"z_woods"})
+	h.enqueue(RuntimeEventRecord.Type.DAMAGE, {&"amount": 1})
+	h.step()
+	h.expect_eq(h.zone.current_zone, &"z_woods", "a same-tick hit does not cancel the crossing")
+	h.expect_eq(h.health.current, h.health.max_pips - 1, "a seam is not a shield — the same-tick hit lands")
+
+	# The gated half: takes the lock, owns the player, and ends the tick, so the
+	# `E` published alongside it never reaches priority 13.
+	h.reset(d)
+	h.enqueue(RuntimeEventRecord.Type.GATED_ZONE_REQUEST,
+		{&"to": &"z_int_shack", &"spawn_marker": &"sp_door"})
+	h.enqueue(RuntimeEventRecord.Type.INTERACT_REQUEST, {&"target": h.stub_interactable})
+	h.step()
+	h.expect(d._lock_ticks > 0, "a gated request takes the transition lock")
+	h.expect_eq(h.player.state, PlayerController.State.ZONE_TRANSITION,
+		"a gated request puts the player in ZONE_TRANSITION")
+	h.expect_eq(h.stub_interactable.interact_calls, 0, "a gated commit ends the tick")
+	h.expect_eq(h.zone.activate_calls, 0,
+		"a gated activation waits behind the opaque overlay (§7.4 step 5b)")
+
+	# --- check 20: control returns on the countdown, never on an animation ---
+	# Four entry points — gated travel, an interior door wipe, §3.2's boot lock
+	# and a respawn — share one release path, so boot is not a special case with
+	# its own rule. With no `TransitionDirector` in existence, a resolver that
+	# waited on a fade would never release at all; one that released on its own
+	# frame counter would release at the wrong tick. Both are caught by asserting
+	# the tick BEFORE the countdown ends as well as the tick it ends on.
+	#
+	# The counts come from the director's own constants. Typing 42 here would be
+	# a second hand-maintained number that drifts the first time §7.4's 0.35 s
+	# moves — exactly what §2.4 forbids.
+	var k: Dictionary = d.get_script().get_script_constant_map()
+	var fade: int = k["FADE_TICKS"]
+	var door: int = k["DOOR_WIPE_TICKS"]
+
+	h.reset(d)
+	d.begin_gated_transition(&"z_int_shack", &"sp_door")
+	_expect_lock_releases(h, d, fade * 2, "a gated transition")
+	h.expect_eq(h.zone.current_zone, &"z_int_shack", "the gated transition arrives on release")
+
+	h.reset(d)
+	d.begin_door_transition(&"z_int_lab", &"sp_stairs")
+	_expect_lock_releases(h, d, door * 2, "an interior door wipe")
+
+	h.reset(d)
+	d.take_lock(fade)   # §3.2 step 5's boot lock
+	_expect_lock_releases(h, d, fade, "the boot lock")
+
+	# A respawn commits at priority 1 and takes the lock during that same tick,
+	# so its countdown starts one step in. §11.2's checkpoint is the default
+	# empty one, which is the same-zone path.
+	h.reset(d)
+	h.enqueue(RuntimeEventRecord.Type.RESPAWN_REQUEST)
+	h.health.current = 1
+	h.step()
+	h.expect_eq(h.player.state, PlayerController.State.ZONE_TRANSITION,
+		"a respawn takes the lock on the tick it commits")
+	h.expect_eq(h.health.current, h.health.max_pips, "a respawn restores full health")
+	_expect_lock_releases(h, d, fade, "a respawn")
+
+	h.release()
+
+
+## Doc 00 §12 check 20's shape, run once per entry point: step the resolver the
+## lock's own declared number of ticks and assert control is still held one tick
+## short of zero and returned exactly at zero.
+func _expect_lock_releases(h, d: Node, ticks: int, what: String) -> void:
+	h.expect_eq(d._lock_ticks, ticks, "%s declares its full countdown" % what)
+	for _i in ticks - 1:
+		h.step()
+	h.expect(
+		d._lock_ticks == 1 and h.player.state == PlayerController.State.ZONE_TRANSITION,
+		"%s still holds control one tick before the countdown ends (_lock_ticks=%d, state=%d)"
+			% [what, d._lock_ticks, h.player.state]
+	)
+	h.step()
+	h.expect_eq(d._lock_ticks, 0, "%s countdown reaches zero" % what)
+	h.expect_eq(h.player.state, PlayerController.State.FREE, "%s returns control at zero" % what)
 
 
 func _signed_area(points: PackedVector2Array) -> float:

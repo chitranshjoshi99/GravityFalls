@@ -11,16 +11,18 @@ extends Node
 ## time passing — and so no tween, fade or animation can gate a gameplay state
 ## change (contract 21).
 ##
-## **How it reaches other systems.** `CombatDirector`, `CutsceneDirector`,
-## `TransitionDirector`, `ZoneManager`, `AudioDirector` and `SessionDirector` do
-## not exist yet (tracker rows 0.11, 0.12, 2.3), and naming an unregistered
-## autoload is a parse error rather than a runtime one. So the resolver holds
-## exactly two nullable, duck-typed handles — `player` and `zone_manager` —
-## which `SessionDirector` assigns at row 0.12 and the harness fills with stubs.
-## Where a rung's full commit needs a system that does not exist, it commits the
-## part the resolver genuinely owns (player state, lock ticks, pending flags,
-## the committed signal) and carries a `ponytail:` comment naming the row that
-## finishes it. No placeholder subsystem is invented to stand in.
+## **How it reaches other systems.** `CombatDirector`, `CutsceneDirector` and
+## `TransitionDirector` are autoloads registered above this one, so they are named
+## as globals below exactly the way `RuntimeEvents`, `GameState` and `Weirdness`
+## are. `ZoneManager`, `AudioDirector` and `SessionDirector` do not exist yet
+## (tracker rows 0.12, 2.3, 3.2), and naming an unregistered autoload is a parse
+## error rather than a runtime one. So the resolver holds exactly two nullable,
+## duck-typed handles — `player` and `zone_manager` — which `SessionDirector`
+## assigns at row 0.12 and the harness fills with stubs. Where a rung's full
+## commit needs a system that does not exist, it commits the part the resolver
+## genuinely owns (player state, lock ticks, pending flags, the committed signal)
+## and carries a `ponytail:` comment naming the row that finishes it. No
+## placeholder subsystem is invented to stand in.
 
 ## §6.2's committed domain. UI, audio, VFX and dialogue subscribe to these and
 ## never to the raw events, because an event is a request and these are facts.
@@ -261,9 +263,19 @@ func _try_respawn() -> bool:
 	# ponytail: `external_force` is cleared at row 1.4, Stamina refilled at 1.5,
 	# the Journal forced CLOSED at 1.9 (§11.1 — no visible reopen).
 
-	# ponytail: steps 5-7 — CombatDirector.reset() or §11.3's encounter restore,
-	# enemy respawn, and AudioDirector's 1.0 s duck release — need rows 0.11,
-	# 2.7 and 3.2. The state this row owns is committed above.
+	# Step 5, and §11.3. An ordinary death wakes up safe, so combat resets. A
+	# checkpoint carrying an encounter block RESTORES instead, because resetting
+	# mid-boss drops the player at a checkpoint with the boss gone and the fight
+	# unwinnable — the worst failure the mechanism exists to prevent.
+	var encounter: Dictionary = cp.get(&"encounter", {})
+	if encounter.is_empty():
+		CombatDirector.reset()
+	else:
+		CombatDirector.restore_encounter(encounter)
+
+	# ponytail: step 5's ordinary-enemy respawn is row 2.7's, and step 7's
+	# AudioDirector 1.0 s duck release is row 3.2's. Step 6's Weirdness floor
+	# arrives with `activate_zone()` at row 2.3.
 	return true
 
 
@@ -464,6 +476,13 @@ func _try_pause() -> bool:
 # --- 6. cutscene ------------------------------------------------------------
 
 func _try_cutscene() -> bool:
+	# §8.1 step 6 first, and before a new request rather than after it: a cutscene
+	# that finished since the last resolve is collected here. Resolution then
+	# CONTINUES past it, because a completion removes no control — it hands it back
+	# — so suppressing rungs 7-15 on that tick would drop a checkpoint or an `E` for
+	# nothing.
+	_complete_cutscene()
+
 	var e := RuntimeEvents.first(RuntimeEvent.Type.CUTSCENE_REQUEST)
 	if e == null:
 		return false
@@ -477,12 +496,73 @@ func _try_cutscene() -> bool:
 		# ponytail: row 1.9 starts that close; until the Journal node exists the
 		# request simply waits, which is the same observable behaviour.
 		return false
+	# §7.7: "On arrival, Player becomes FREE before an automatic zone-entry story
+	# may take control." `CutsceneDirector.request()` marks an arrival story in the
+	# payload; the countdown is `_arrival_grace_ticks`, owned and ticked here so
+	# there is only ever one of it (§0.1, §14.1).
+	#
+	# REFUSED, never consumed: the event is not appended to `_committed`, so §4.6's
+	# `_defer_survivors()` carries it to the next tick. Consuming it here would drop
+	# the arrival story forever.
+	if _arrival_grace_ticks > 0 and bool(e.payload.get(&"arrival_story", false)):
+		return false
 	_committed.append(e)
+	# §8.1 step 5. `begin()` refuses an id that never came through
+	# `CutsceneDirector.request()`, and a player left in `CUTSCENE` for a cutscene
+	# that does not exist has nothing to end it — a soft-lock, which is the failure
+	# class this whole document is written against. So the state change is sequenced
+	# AFTER the acceptance and never before it. A refused request is consumed rather
+	# than deferred, for the reason `_try_chapter_advance()` gives: carrying it
+	# forward would re-fire `begin()`'s push_error every tick.
+	if not CutsceneDirector.begin(e.payload.get(&"id", &"")):
+		return false
 	player.state = PlayerController.State.CUTSCENE
-	# ponytail: CutsceneDirector.request() at row 0.11 owns the dialogue, the
-	# camera, the return to FREE, and the `on_complete_flag` write that keeps an
-	# interrupted cutscene from leaving a half-set world (§8.2).
+	# ponytail: the dialogue, the camera and the typewriter are row 3.6's, and so is
+	# the `complete()` call that ends a cutscene. Nothing calls it today but the
+	# suite, which is why nothing yet clears a cutscene interrupted by a blackout.
 	return true
+
+
+## §8.1 step 6 and §8.2.1's three commits, in that order and all in this one
+## place. Completion is POLLED (`CutsceneDirector`'s header): a completion is a
+## fact and not a request, so there is no `RuntimeEvent.Type` for it and no signal
+## back into the resolver, which would commit outside §4.1's one pass.
+func _complete_cutscene() -> void:
+	var config: Dictionary = CutsceneDirector.take_completed()
+	# The poll, and why it is two conditions. A non-empty handoff is a completion
+	# outright. An EMPTY one is ambiguous — `{}` is both "nothing finished" and the
+	# config of a cutscene authored with no fields — so the second arm catches the
+	# ambiguous case by its only other symptom: the player sits in `CUTSCENE` while
+	# the director holds nothing active, which is a state with nothing to end it.
+	if config.is_empty() and (
+			CutsceneDirector.is_active()
+			or player.state != PlayerController.State.CUTSCENE):
+		return
+	# §8.2: "A cutscene never sets `GameState` fields directly. It declares
+	# `on_complete_flag`, and `RuntimeDirector` writes it on completion — so a
+	# cutscene interrupted by a blackout does not leave a half-set world."
+	var flag: StringName = config.get(&"on_complete_flag", &"")
+	if flag != &"":
+		GameState.data.flags[flag] = true
+		GameState.mark_dirty()   # §9.1
+	# §8.1 step 6: the player returns to FREE and "the Journal remains CLOSED", so
+	# nothing here reopens or touches it. Guarded on `CUTSCENE` because a hit that
+	# committed at priority 4 on this same tick has already moved the player to
+	# HURT, and its recovery — row 4.1's — is what returns control then.
+	if player.state == PlayerController.State.CUTSCENE:
+		player.state = PlayerController.State.FREE
+	# §8.2.1: an ENQUEUE, never a state assignment. `RuntimeEvents.enqueue()` always
+	# writes `_incoming`, so this lands on the NEXT tick and resolves through its own
+	# priority row — which is the whole point: "Because it is an intent and not a
+	# state assignment, it can lose. If the player takes a hit on the tick after the
+	# cutscene ends, damage at priority 4 cancels it and the Journal stays closed."
+	#
+	# Not re-validated here. `CutsceneDirector.request()` refuses anything outside
+	# §8.2.1's three permitted types at request time and keeps that set as its own
+	# constant; a second copy of a security list is what §0.1 forbids, and the drift
+	# would be silent.
+	if config.has(&"on_complete_intent"):
+		RuntimeEvents.enqueue(config[&"on_complete_intent"], self)
 
 
 # --- 7. dodge ---------------------------------------------------------------
@@ -728,10 +808,27 @@ func _try_passive() -> bool:
 		# An empty payload clears; a populated one arms. Committing at 14 means
 		# a player who dies on the exact tick a phase begins respawns at the
 		# PREVIOUS phase, never a half-armed new one (§11.3).
-		# ponytail: rejecting an arm whose `setup` was never registered needs
-		# CombatDirector's phase-setup registry — rows 0.11 and 4.6. Until then
-		# an unregistered name is written rather than refused, which §12 check 28
-		# is what will catch.
+		#
+		# §11.3's last paragraph: a populated payload is rejected with `push_error`
+		# if `setup` names a phase setup that was never registered with
+		# `CombatDirector`, "a typo there would otherwise produce a checkpoint that
+		# respawns into an empty boss arena". An EMPTY payload clears and is always
+		# legal, and a populated one naming no `setup` is not the case being
+		# guarded. Nothing is written before this gate, so a refusal cannot leave a
+		# half-armed block; and it is consumed rather than deferred, for the reason
+		# `_try_chapter_advance()` gives — carrying it forward re-fires the error
+		# every tick.
+		var setup: StringName = e.payload.get(&"setup", &"")
+		if setup != &"" and not CombatDirector.has_phase_setup(setup):
+			push_error(
+				"ENCOUNTER_STATE_REQUEST names a phase setup never registered with CombatDirector: %s"
+				% setup
+			)
+			continue
+		# ponytail: row 4.6 authors the first chapter that registers a setup and
+		# gives `_phase_setups` its reader. Until then no name is ever registered,
+		# so every named `setup` is refused — the correct answer to a name nothing
+		# has registered.
 		GameState.data.checkpoint[&"encounter"] = e.payload.duplicate(true)
 		GameState.mark_dirty()
 		committed = true
@@ -838,8 +935,14 @@ func _begin_locked_travel(to: StringName, marker: StringName, wipe_ticks: int,
 	# overlay simply holds opaque. Gameplay never resumes because an animation
 	# finished — it resumes because the resolver says so.
 	take_lock(wipe_ticks * 2 + _mount_budget_ticks(to))
-	# ponytail: TransitionDirector.play_fade(wipe_ticks) — presentation only —
-	# is row 0.11's, and ZoneManager's free/load/place is row 2.3's.
+	# §7.4 step 4, and §4.5's `play_fade(FADE_TICKS)  # presentation only`. AFTER the
+	# lock is taken, and nothing is read back from it: the overlay mirrors the
+	# countdown and has no authority over it, so this is presentation sequenced by
+	# the resolver rather than a step the resolver waits on. §11.2 step 3's "no
+	# fade-out is played, we are already black" needs no branch — the fade tweens
+	# from the CURRENT alpha, so an already-opaque overlay simply holds.
+	TransitionDirector.play_fade(wipe_ticks)
+	# ponytail: ZoneManager's free/load/place — §7.4 step 5 — is row 2.3's.
 
 
 ## §4.5's mount budget.
@@ -896,6 +999,10 @@ func _complete_transition() -> void:
 func _apply_teardown(teardown: Dictionary) -> void:
 	if teardown.is_empty():
 		return
+	# §7.4.1 defines the flag as "boss_active/id/phase → 0, aggro cleared", which is
+	# exactly `reset()`.
+	if teardown.get(&"clear_combat", false):
+		CombatDirector.reset()
 	if teardown.get(&"exit_vehicle", false):
 		_exit_vehicle()
 	if teardown.get(&"restore_health", false) and player.health != null:
@@ -908,8 +1015,6 @@ func _apply_teardown(teardown: Dictionary) -> void:
 	if not checkpoint.is_empty():
 		GameState.data.checkpoint = checkpoint.duplicate(true)
 		GameState.mark_dirty()
-	# ponytail: `clear_combat` — boss_active/id/phase to zero and aggro cleared —
-	# needs CombatDirector, row 0.11.
 
 
 # --- shared predicates ------------------------------------------------------

@@ -20,8 +20,21 @@ Weirdness="*res://autoload/weirdness.gd"
 Settings="*res://autoload/settings.gd"
 GameState="*res://autoload/game_state.gd"
 RuntimeEvents="*res://autoload/runtime_events.gd"
-; Doc 00 §2.2 places RuntimeDirector twelfth and LAST. Rows 0.11, 0.12 and 2.3
-; insert AudioDirector, Combat/Cutscene/TransitionDirector, ZoneManager and
+; §2.2 puts AudioDirector sixth and CombatDirector seventh. AudioDirector does
+; not exist until row 3.2, so CombatDirector simply takes the next line — the
+; table fixes the ORDER of what exists, and a placeholder for a missing autoload
+; would be a file that boots nothing.
+CombatDirector="*res://autoload/combat_director.gd"
+; §2.2 places CutsceneDirector eighth, immediately after CombatDirector — the
+; same packing-upward rule as the comment above.
+CutsceneDirector="*res://autoload/cutscene_director.gd"
+; §2.2 places TransitionDirector ninth, immediately after CutsceneDirector — the
+; same packing-upward rule as the two comments above. It is presentation only and
+; reaches nothing, so its position matters only in that it is ABOVE the resolver,
+; which calls it (§4.5).
+TransitionDirector="*res://autoload/transition_director.gd"
+; Doc 00 §2.2 places RuntimeDirector twelfth and LAST. Rows 0.11, 0.12, 2.3 and
+; 3.2 insert AudioDirector, Cutscene/TransitionDirector, ZoneManager and
 ; SessionDirector ABOVE this line, never below it: the resolver reaches for all
 ; of them, and an autoload may only reference autoloads registered above it.
 RuntimeDirector="*res://autoload/runtime_director.gd"

@@ -77,6 +77,11 @@ var health: Node
 var stub_interactable: Node
 var _events: Node
 var _game_state: Node
+## The three row-0.11 directors the resolver now commits into. Shared with every
+## check, so `reset()` clears each one's own domain state — see `_reset_directors()`.
+var _combat: Node
+var _cutscene: Node
+var _transition: Node
 
 
 ## Doc 00 §5.2 / §7.5. The resolver asks one question of the Journal — "does
@@ -137,6 +142,12 @@ func reset(d: Node) -> void:
 	director = d
 	_events = d.get_node(^"/root/RuntimeEvents")
 	_game_state = d.get_node(^"/root/GameState")
+	# By path from the director, for the reason in this section's header: the global
+	# identifiers are unusable in a preloaded script.
+	_combat = d.get_node(^"/root/CombatDirector")
+	_cutscene = d.get_node(^"/root/CutsceneDirector")
+	_transition = d.get_node(^"/root/TransitionDirector")
+	_reset_directors()
 
 	player = PlayerController.new()
 	journal = JournalStub.new()
@@ -164,6 +175,21 @@ func reset(d: Node) -> void:
 	# A committed activation calls GameState.mark_dirty(), and GameState._process
 	# would then autosave over the developer's real slot 0.
 	_game_state._dirty = false
+
+
+## The resolver commits into all three row-0.11 directors, and every check drives
+## the one live instance of each — so a check that leaves a boss armed, a cutscene
+## pending or the overlay mid-fade would otherwise change the next check's result.
+## Each director's own reset is what prevents that; nothing here reaches inside one
+## except `_phase_setups`, which `CombatDirector.reset()` deliberately keeps (a
+## chapter registers its setups once, at `_ready()`).
+func _reset_directors() -> void:
+	_combat.reset()
+	_combat._phase_setups.clear()
+	_cutscene.reset()
+	# TransitionDirector has no reset() by design — the alpha is its only state, and
+	# `set_opaque()` both writes it and kills any tween in flight (its header).
+	_transition.set_opaque(false)
 
 
 func enqueue(type: RuntimeEvent.Type, payload: Dictionary = {}) -> void:
@@ -200,6 +226,10 @@ func release() -> void:
 		_events.swap()
 	if _game_state != null:
 		_game_state._dirty = false
+	# Also on the way out, so a real physics frame after the suite finishes cannot
+	# resolve against an armed boss or a cutscene the suite left pending.
+	if _combat != null:
+		_reset_directors()
 	for n: Node in [player, journal, zone, health, stub_interactable]:
 		if n != null:
 			n.free()

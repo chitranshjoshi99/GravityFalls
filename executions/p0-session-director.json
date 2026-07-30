@@ -1,0 +1,93 @@
+{
+  "requirement": "Tracker row 0.12 — build the SessionDirector autoload (Doc 00 §3): the boot sequence's step 6-7, begin_session(), end_session(), and the one Weirdness.bind() call on world_root's grade. Register it above RuntimeDirector per Doc 00 §2.2, and prove the row's Verify column — Doc 00 §12 check 12 (end_session leaves no freed-node reference and a re-begin is playable) and check 35 (exactly one node in the tree carries the weirdness shader, bound during begin_session) — plus the row's Notes clause, that the player instantiates BEFORE the first zone.",
+  "repo": "/Users/chitranshjoshi/Work/GravityFalls",
+  "trackerRow": "0.12",
+  "checkpointEvery": 3,
+  "priorState": "Rows 0.1-0.11 Done. Suite green at 446 checks (baseline verified 2026-07-30). RuntimeDirector is pure and holds two nullable handles, `player` and `zone_manager`, whose docstrings say SessionDirector assigns both at this row. Weirdness.bind() exists and has never been called by anything. TransitionDirector.set_opaque()/play_fade_in() exist. CombatDirector.reset() exists.",
+  "toolchain": {
+    "godot": "4.7.1",
+    "testCommand": "godot --headless --script res://tests/test_all.gd",
+    "gate": "Exit 0 is NOT sufficient — Godot exits 0 when test_all.gd fails to parse. Green means the run also printed `test_all: N checks passed` with N greater than 446, zero FAIL lines, and exactly the six documented expected ERROR lines."
+  },
+  "architecture": {
+    "decision": "SessionDirector is authored to Doc 00 §3.2's sequence exactly, but every collaborator that does not exist yet is reached through a nullable, duck-typed handle resolved by node path at `_ready()`, and every scene that does not exist yet is loaded through a `ResourceLoader.exists()` guard with a code-built minimal fallback. No placeholder subsystem is invented. This is the same pattern rows 0.10 and 0.11 established for RuntimeDirector's `player`/`zone_manager` handles, extended to the two remaining unregistered autoloads (ZoneManager, AudioDirector) and the two unbuilt scenes (dipper.tscn row 1.1, world_root.tscn row 2.2).",
+    "alternatives": [
+      "Mark row 0.12 Blocked until rows 1.1, 2.2, 2.3 and 3.2 exist. Rejected: the tracker's build order is priority order and 0.12 is the next undone row; RuntimeDirector's own docstrings already declare that SessionDirector assigns its handles, so the resolver has an unbound player until this row lands. Rows 0.10 and 0.11 both shipped against missing collaborators by the same rule.",
+      "preload() the two scenes as §3.2 writes it. Rejected: preload() of a nonexistent path is a PARSE error, which under `godot --headless --script` fails the whole suite silently at exit 0 (row 6.1's known trap).",
+      "Create res://world/world_root.tscn and res://actors/player/dipper.tscn now as stubs. Rejected: world_root.tscn is tracker row 2.2's deliverable (parallax + the grade's CanvasLayer, the 0.06 visibility skip, the CanvasModulate fallback) and dipper.tscn is row 1.1's. A stub file at either path would be silently adopted by that row instead of authored.",
+      "Defer §12 check 35 to row 2.2 and gate 0.12 on check 12 alone. Rejected: check 35 is in this row's Verify column, and row 2.2's Verify says '(also covers 0.12)' — i.e. 2.2 RE-verifies it. A code-built fallback grade makes the check real today and the same assertion passes unchanged against 2.2's authored scene."
+    ],
+    "seams": [
+      "S1 — project.godot registration: SessionDirector goes immediately ABOVE RuntimeDirector and below TransitionDirector, per Doc 00 §2.2's table (11th of 12) and the packing-upward rule already written in project.godot's comments. RuntimeDirector stays LAST.",
+      "S2 — Doc 00 §14.1 holds. SessionDirector performs the BOOT-TIME wiring §3.2 assigns it (create world root, bind the grade, instantiate the player, bind the resolver and ZoneManager, take the boot lock) and commits no gameplay state thereafter. It has no _physics_process and no per-tick behaviour at all.",
+      "S3 — unregistered autoloads (ZoneManager, AudioDirector) are held as `var zone_manager: Node` / `var audio_director: Node`, resolved once in `_ready()` via `get_node_or_null(^\"/root/ZoneManager\")` and `get_node_or_null(^\"/root/AudioDirector\")`. Naming either as a global identifier is a parse error today. Every use is guarded by a null check that names the row which fills it (2.3, 3.2). The fields are public so the suite can substitute a stub — that is the only other writer.",
+      "S4 — unbuilt scenes are loaded as `ResourceLoader.exists(path)` then `load(path)`, never `preload()`. When absent, begin_session() builds the minimum equivalent in code: world root is a Node2D named `WorldRoot` carrying a CanvasLayer at layer 100 (Doc 01 §2.1) whose child ColorRect is named `WeirdnessGrade` and carries a ShaderMaterial over res://shaders/weirdness.gdshader, plus a Node2D named `Actors`; the player is `PlayerController.new()`. Each fallback carries a `ponytail:` comment naming the row that replaces it (2.2, 1.1).",
+      "S5 — the grade is found with a RECURSIVE `find_child(\"WeirdnessGrade\", true, false)`, not §3.2's literal `world_root.get_node(^\"WeirdnessGrade\")`. Doc 01 §2.1 puts the one grade ColorRect on its own CanvasLayer at layer 100, so it is a GRANDCHILD of world_root and §3.2's flat path cannot resolve it. The recursive find resolves both shapes, so row 2.2 may author either without editing this file.",
+      "S6 — begin_session()'s `await` stays inside the `if zone_manager != null` branch. With no ZoneManager registered the function completes synchronously, which is what lets the suite call it without awaiting. Row 2.3 makes it a real coroutine and the suite's call site gains an `await` then.",
+      "S7 — the boot lock is taken through `RuntimeDirector.take_lock(RuntimeDirector.FADE_TICKS)` and released by the resolver's own countdown (§4.5, §12 check 20). SessionDirector never sets player.state after the initial ZONE_TRANSITION assignment §3.2 step 2 specifies, and never waits on TransitionDirector.",
+      "S8 — end_session() is the exact inverse of begin_session() and leaves NO autoload holding a reference into the freed subtree: RuntimeDirector.player = null, RuntimeDirector.zone_manager = null, ZoneManager unbound if present, Weirdness unbound from the freed grade's material, CombatDirector.reset(), Weirdness.set_zone_floor(0.0), RuntimeEvents drained, world_root freed, its own two fields nulled. That set IS §12 check 12.",
+      "S9 — the save flush at end_session goes through `GameState.mark_dirty()`, Doc 00 §9.1's deferred write path, not a direct `save_slot()`. One write site in the project, no physics-frame stall, and the suite's existing `_dirty = false` guard keeps a test run from overwriting the developer's real slot 0."
+    ],
+    "adr": null,
+    "note": "Doc 00 §3.2 authors this file almost line for line, so the only genuinely open fork was how to survive four missing collaborators. Settled above by extending rows 0.10/0.11's established pattern rather than in a full ADR."
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Add the SessionDirector autoload",
+      "intent": "Author res://autoload/session_director.gd to Doc 00 §3.2 and §3.3, and register it in project.godot immediately above RuntimeDirector. begin_session() creates world_root, binds Weirdness to the one grade material, instantiates the player BEFORE any zone mounts, wires ZoneManager/RuntimeDirector/CombatDirector, sets the overlay opaque, mounts the initial zone if a ZoneManager exists, and hands the boot lock to the resolver. end_session() undoes all of it and leaves no reference into the freed subtree.",
+      "files": ["autoload/session_director.gd", "project.godot"],
+      "constraints": "Seams S1-S9. No preload of a nonexistent path. No global identifier for ZoneManager or AudioDirector. No _physics_process, no gameplay state written after boot. Do not create res://world/world_root.tscn or res://actors/player/dipper.tscn — those are rows 2.2 and 1.1.",
+      "acceptance": "The project parses and the existing suite still reports 446 checks passed with zero FAIL lines. SessionDirector is registered above RuntimeDirector in project.godot. begin_session() completes synchronously today, leaves world_root in the tree with exactly one node carrying the weirdness shader, the player inside world_root's Actors node, RuntimeDirector.player bound, and _lock_ticks equal to RuntimeDirector.FADE_TICKS.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": [],
+      "status": "done",
+      "result": "autoload/session_director.gd added and registered eleventh, immediately above RuntimeDirector. Suite still green at 446 checks with zero FAIL lines, so nothing existing regressed and the file parses — which under `--script` is not something exit 0 alone would have proven.",
+      "deviations": [
+        "§3.2's `const PLAYER_SCENE := preload(...)` and `const WORLD_SCENE := preload(...)` cannot be written as authored: `preload()` of a nonexistent path is a PARSE error, and row 0.9's finding makes that worse than a crash — a parse failure under `godot --headless --script` exits 0 having run zero checks. Both are `ResourceLoader.exists()` + `load()` behind a `ponytail:` comment naming rows 2.2 and 1.1.",
+        "DOC CONFLICT, one of the two documents should move: §3.2 reads the grade as `world_root.get_node(^\"WeirdnessGrade\")` — a direct child — while Doc 01 §2.1 says it 'lives on world_root, on its own CanvasLayer at layer 100', which makes it a GRANDCHILD. The flat path cannot resolve the node §2.1 specifies. A recursive `find_child(GRADE_NAME, true, false)` resolves either shape, so row 2.2 may author the scene to §2.1 without editing session_director.gd.",
+        "§3.2 step 3 lists only `RuntimeDirector.bind(player)`, but the resolver also holds a duck-typed `zone_manager` that row 0.10 documented as this row's to assign (its docstring: 'assigned by SessionDirector.begin_session() and by nothing else'). `RuntimeDirector.zone_manager = zone_manager` is added to step 3; §3.2 predates the handle.",
+        "§3.3's teardown list is incomplete against its own §12 check 12. It names the save flush, freeing world_root, CombatDirector.reset(), Weirdness.set_zone_floor(0.0), the menu rack and clearing RuntimeEvents — but not unbinding ZoneManager (which holds `_world_root` and `_player`, Doc 3 §3.2) and not unbinding Weirdness from the freed grade's material. Both are added. ZoneManager's real teardown — freeing the live zone instances and clearing `_live`/`_loading` — is row 2.3's; 0.12 can only unbind.",
+        "§3.3's 'flush a save (§9.3)' is implemented as `GameState.mark_dirty()`, which is §9.1's deferred-write path and the row §9.1's own trigger table lists. A direct `save_slot()` would be a second write site that could disagree with the autosave. Consequence for every later row: a check that calls `end_session()` must clear `GameState._dirty` before the next frame, or `GameState._process()` autosaves over the developer's real slot 0.",
+        "§3.1's boot sequence is deliberately NOT a method here. Step 1 is the engine's autoload order, step 2 is AudioDirector._ready() (row 3.2), step 3 is already done by Settings._ready() calling load_settings(), and steps 4-5 are Doc 04 §7.1's main menu (row 3.5) choosing new_game() or load_slot(0). A `boot()` today would have an empty body and no caller. Row 3.5 is what calls begin_session(), and the header says so.",
+        "S6's consequence, stated for row 2.3: `begin_session()`'s only `await` sits inside the `if zone_manager != null` branch, so with no ZoneManager registered the function completes synchronously. The suite already writes `await s.begin_session()` so the call site does not change when the real threaded loader arrives."
+      ]
+    },
+    {
+      "id": "T2",
+      "title": "Prove Doc 00 §12 checks 12 and 35 in the suite",
+      "intent": "Append _check_session_director() to tests/test_all.gd: the registration slot, the boot ordering clause from the row's Notes (player exists before the first zone mounts), §12 check 35 (exactly one node in the tree carries the weirdness shader material, and Weirdness.bind() was called on it during begin_session), and §12 check 12 (end_session leaves no autoload holding a freed-node reference, and a begin_session immediately after produces a playable state — the boot lock counts down to FREE).",
+      "files": ["tests/test_all.gd"],
+      "constraints": "Runs from the existing --script suite, not a new scene_harness.tscn: these two checks need a real root and real nodes, both of which a --script SceneTree has, and neither needs a physics server. Drive ticks with the existing _tick()/call(&\"_physics_process\") idiom rather than awaiting real frames, and leave the tree clean (end_session, handles nulled, GameState.new_game()) before returning so a later awaited frame cannot resolve against the suite's nodes. Use a ZoneManager stub assigned to SessionDirector.zone_manager to observe mount ordering.",
+      "acceptance": "Suite green with N > 446 and zero FAIL lines; the six documented expected ERROR lines are unchanged. The check fails if the shader material is carried by zero or two nodes, if Weirdness is left bound to the freed grade, if any autoload still references a freed node after end_session, or if the re-begun session cannot reach FREE.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T1"],
+      "status": "done",
+      "result": "_check_session_director() added to tests/test_all.gd with two stubs (ZoneManagerStub, AudioDirectorStub) and two helpers (_collect_grade_carriers, _canvas_layer_of). Suite green at 485 checks, up from 446, zero FAIL lines, the six documented ERROR lines unchanged. Verified independently by two mutations: removing `Weirdness.bind(null)` from end_session() failed exactly one check ('Weirdness is unbound from the freed grade's material'), and moving the player's add_child() below the mount failed exactly one check ('the player is already in the tree when the first zone is asked to mount'). Both reverted; user://slot0.sav was not touched by any run.",
+      "deviations": [
+        "§12 says checks 1-3, 6, 14, 34, 35 and 39 run from res://tests/scene_harness.tscn. Check 35 is the first to come due and it runs from the existing `--script` suite instead: a `--script` SceneTree has a real root, real nodes and a real ShaderMaterial, which is everything 'exactly one node in the tree' needs, and no physics server or rendering. scene_harness.tscn stays unbuilt until a check needs what a `--script` run genuinely lacks — overlap queries, collision, a camera — which is row 1.4 (check 31) and row 4.1.",
+        "Godot 4.7 exposes no `CanvasItem.get_canvas_layer()`; the check walks parents to the nearest CanvasLayer to assert Doc 01 §2.1's layer 100. Found by a SCRIPT ERROR on the first run, not by reading the docs.",
+        "The boot lock is stepped by hand with `_tick(d)` rather than by awaiting real frames, so the check cannot flake on how many physics frames a `--script` run happens to serve. The only awaited frames are the two after `end_session()`, because §3.3 uses `queue_free()` — which is correct for a menu button's signal handler and means 'the node is actually freed' is only observable a frame later.",
+        "The suite writes `GameState.data.checkpoint` to observe §9.2's marker-first rule in what mount_initial() receives, and calls `new_game()` at the end to undo it — the same pattern _check_resolver_wiring() already uses for the state it writes."
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "Close the tracker row and commit",
+      "intent": "Set tracker row 0.12 to Done with a Notes column that records what the row actually built and the deviations a later row must act on, add the dated Log line, and commit referencing the row.",
+      "files": ["docs/TRACKER.md", "executions/p0-session-director.json"],
+      "constraints": "Notes and Log follow rows 0.10/0.11's shape: what was built, then the findings a later row will feel. Do not mark Done unless the suite is green.",
+      "acceptance": "Row 0.12 reads Done, the Log has a 2026-07-30 / 0.12 entry naming the plan file, and the commit message names the row.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T2"],
+      "status": "done",
+      "result": "Tracker row 0.12 set to Done with the four findings a later row must act on, and a 2026-07-30 Log entry naming this plan file. P0 · Runtime spine is now complete; the next undone row is 1.4.",
+      "deviations": [
+        "No visual validation for this row, and none is possible: P0's own preamble says 'there is nothing to look at', the session boots a code-built world root with a flat black grade at level 0.0, and the first screen the project renders arrives at row 1.1. The evidence for this row is the suite's 485 checks and the two mutation runs recorded on T2."
+      ]
+    }
+  ]
+}

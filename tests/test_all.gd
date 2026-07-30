@@ -133,9 +133,15 @@ func _init() -> void:
 	_check_resolver_wiring(h)       # tracker 0.11 / Doc 00 §12 checks 22-24, 28
 
 	# --- (scene) checks -----------------------------------------------------
-	# Doc 00 §12's checks 1-3, 6, 14, 34, 35 and 39 need a real scene tree and
-	# run from res://tests/scene_harness.tscn, entered from right here. Nothing
-	# needs a tree until tracker row 0.12, so the harness scene is not built.
+	# Doc 00 §12's checks 1-3, 6, 14, 34, 35 and 39 need a real scene tree.
+	# §12 says they run from res://tests/scene_harness.tscn; check 35 is the first
+	# of them to come due (row 0.12) and it needs a real `root`, real nodes and a
+	# real material — all of which a `--script` SceneTree already has — and no
+	# physics server, no rendering and no main scene. So it runs here, in the one
+	# suite, and the harness SCENE stays unbuilt until a check needs something a
+	# `--script` run genuinely lacks: overlap queries, collision, a camera. Rows
+	# 1.4 and 4.1 are where that arrives.
+	await _check_session_director(h)   # tracker 0.12 / Doc 00 §12 checks 12, 35
 
 	h.report()
 	quit(h.exit_code())
@@ -1629,6 +1635,288 @@ func _check_resolver_wiring(h) -> void:
 	h.release()
 	gs.new_game()
 	enemy.free()
+
+
+## Doc 3 §3.2's two entry points that Doc 00 §3.2 actually calls, and nothing
+## else. `ZoneManager` does not exist until tracker row 2.3, so the stub is also
+## the only way to observe §3.2's ordering rule from outside: it records, at the
+## moment the first zone is asked to mount, whether the player was already in the
+## tree. That is the row's Notes clause turned into a fact rather than a reading
+## of the source.
+class ZoneManagerStub extends Node:
+	var bound_world: Node
+	var bound_player: Node
+	var mount_calls := 0
+	var mounted_zone: StringName = &""
+	var mounted_marker: StringName = &""
+	var player_in_tree_at_mount := false
+
+	func bind(world_root: Node2D, p: Node2D) -> void:
+		bound_world = world_root
+		bound_player = p
+
+	func mount_initial(zone_id: StringName, marker: StringName, _position: Vector2) -> void:
+		mount_calls += 1
+		mounted_zone = zone_id
+		mounted_marker = marker
+		player_in_tree_at_mount = bound_player != null and bound_player.is_inside_tree()
+
+
+## Doc 5's one call §3.3 makes. Row 3.2 builds the real one.
+class AudioDirectorStub extends Node:
+	var zone_calls: Array[StringName] = []
+
+	func set_zone(id: StringName) -> void:
+		zone_calls.append(id)
+
+
+## Tracker 0.12 / Doc 00 §3, §12 checks 12 and 35.
+##
+## This check drives the LIVE `SessionDirector` against the LIVE resolver and the
+## real `root`, because that is the only place check 35's "exactly one node in the
+## tree" can be counted. Every tick is driven by hand through `_tick()` rather
+## than by awaiting real frames, for the same reason the pure harness does it: an
+## awaited frame would advance the boot lock by an unpredictable amount and the
+## check would flake instead of failing. The two `await process_frame`s below are
+## the exception, and they are there because `queue_free()` is what §3.3 uses.
+##
+## It leaves the tree exactly as it found it — session ended, handles nulled,
+## stubs freed, `GameState` clean — so a real physics frame after the suite
+## finishes cannot resolve against anything this check made.
+func _check_session_director(h) -> void:
+	h.expect_eq(
+		ProjectSettings.get_setting("autoload/SessionDirector"),
+		"*res://autoload/session_director.gd",
+		"SessionDirector autoload registration"
+	)
+	var s: Node = root.get_node_or_null(^"SessionDirector")
+	var d: Node = root.get_node_or_null(^"RuntimeDirector")
+	var w: Node = root.get_node_or_null(^"Weirdness")
+	var ev: Node = root.get_node_or_null(^"RuntimeEvents")
+	var gs: Node = root.get_node_or_null(^"GameState")
+	var t: Node = root.get_node_or_null(^"TransitionDirector")
+	if not h.expect(
+		s != null and d != null and w != null and ev != null and gs != null and t != null,
+		"the row 0.12 autoloads are all in the tree"
+	):
+		return
+
+	# §2.2: "Registration order is load-bearing." Asserted off root's child order
+	# rather than off project.godot's text, because the child order IS the order
+	# the engine ran the `_ready()`s in — SessionDirector reaches for RuntimeDirector
+	# and must be registered above it.
+	var kids := root.get_children()
+	h.expect(
+		kids.find(s) < kids.find(d),
+		"SessionDirector is registered above RuntimeDirector (§2.2's eleventh and twelfth)"
+	)
+	h.expect(
+		kids.find(s) > kids.find(t),
+		"and below TransitionDirector, which it calls at §3.2 step 4"
+	)
+
+	# The two collaborators §3.2 names that do not exist yet. Substituting stubs
+	# here is what makes steps 3, 4 and §3.3's audio line observable at all; the
+	# handles are public for exactly this, and nothing in the shipped game writes
+	# them (SessionDirector._ready() resolves both by path).
+	var zm := ZoneManagerStub.new()
+	var audio := AudioDirectorStub.new()
+	root.add_child(zm)
+	root.add_child(audio)
+	s.zone_manager = zm
+	s.audio_director = audio
+
+	# A known checkpoint, so the marker-first rule of §9.2 is observable in what
+	# `mount_initial()` receives. `new_game()` at the end of the check undoes it.
+	gs.data.checkpoint[&"zone_id"] = &"z_shack_ext"
+	gs.data.checkpoint[&"spawn_marker"] = &"sp_porch"
+
+	# --- §3.2 -----------------------------------------------------------------
+	# Awaited even though the stub cannot suspend: row 2.3 gives `mount_initial()`
+	# a real threaded load, and a call site that only works while the loader is a
+	# stub is a call site that breaks on the day it matters.
+	await s.begin_session()
+
+	h.expect(
+		s.world_root != null and s.world_root.is_inside_tree(),
+		"begin_session() puts a world root in the tree"
+	)
+	h.expect_eq(zm.bound_world, s.world_root, "ZoneManager is bound to that world root (§3.2 step 3)")
+	h.expect_eq(d.player, s.player, "the resolver is bound to the player (§3.2 step 3)")
+	h.expect_eq(d.zone_manager, zm, "and to the zone manager, which row 0.10 left for this row")
+	h.expect_eq(zm.mount_calls, 1, "the initial zone mounts exactly once")
+	h.expect_eq(zm.mounted_zone, &"z_shack_ext", "the checkpoint's zone is what mounts")
+	h.expect_eq(
+		zm.mounted_marker, &"sp_porch",
+		"and the marker — not a raw coordinate — is what it mounts at (§9.2, contract 33)"
+	)
+
+	# The row's Notes clause, and §3.2's own closing paragraph: "The player is
+	# instantiated BEFORE the first zone so that destination Area2Ds at the spawn
+	# marker overlap a body that already exists. Reversing this is the classic
+	# first-frame null."
+	h.expect(
+		zm.player_in_tree_at_mount,
+		"the player is already in the tree when the first zone is asked to mount (§3.2)"
+	)
+	h.expect(
+		s.player != null and s.player.get_parent() != null
+			and s.player.get_parent().name == "Actors",
+		"the player is parented under world_root's Actors node"
+	)
+
+	# --- §12 check 35 ---------------------------------------------------------
+	# "Exactly one node in the tree carries the weirdness shader material, and
+	# Weirdness.bind() was called on it during begin_session()." Counted over the
+	# WHOLE tree, from root, because the failure this catches is a second grade
+	# appearing in a zone scene or surviving a previous session — never a second
+	# one next to the first.
+	var shader: Shader = load("res://shaders/weirdness.gdshader")
+	h.expect(shader != null, "the weirdness shader loads")
+	var carriers: Array[CanvasItem] = []
+	_collect_grade_carriers(root, shader, carriers)
+	h.expect_eq(carriers.size(), 1, "exactly one node in the tree carries the weirdness shader (§12·35)")
+	if carriers.size() == 1:
+		var grade := carriers[0]
+		h.expect_eq(grade.name, "WeirdnessGrade", "and it is the node Doc 01 §2.1 names")
+		h.expect_eq(
+			w._mat, grade.material,
+			"Weirdness.bind() was called on that node's material during begin_session() (§12·35)"
+		)
+		var grade_layer := _canvas_layer_of(grade)
+		h.expect(
+			grade_layer != null and grade_layer.layer == 100,
+			"the grade sits on its own CanvasLayer at layer 100 (Doc 01 §2.1)"
+		)
+		h.expect(
+			grade.get_parent() != null and s.world_root.is_ancestor_of(grade),
+			"and it hangs off world_root, never off a zone scene (Doc 03 §2.3)"
+		)
+
+	# --- §3.2 steps 4-5: the boot lock ----------------------------------------
+	var rk: Dictionary = d.get_script().get_script_constant_map()
+	var fade_ticks: int = rk["FADE_TICKS"]
+	h.expect_eq(t.alpha(), 1.0, "the mount happened behind an already-opaque overlay (§3.2 step 4)")
+	h.expect_eq(d._lock_ticks, fade_ticks, "boot hands the resolver a full fade's countdown")
+	h.expect_eq(
+		s.player.state, PlayerController.State.ZONE_TRANSITION,
+		"boot holds control while the countdown runs"
+	)
+	# §12 check 20's fourth entry point — boot — and §4.5: control comes back
+	# because the resolver says so, not because the fade finished. No frame is
+	# awaited here, so no tween has advanced at all.
+	for _i in fade_ticks:
+		_tick(d)
+	h.expect_eq(d._lock_ticks, 0, "the boot lock counts down to zero")
+	h.expect_eq(
+		s.player.state, PlayerController.State.FREE,
+		"a booted session is playable — control returns on _lock_ticks == 0 (§3.2 step 5)"
+	)
+
+	# --- §12 check 12 ---------------------------------------------------------
+	# An event published by the session that is quitting must not resolve into the
+	# next one, so there is something in the queue when end_session() runs.
+	ev.enqueue(RuntimeEventRecord.Type.INTERACT_REQUEST, null, {})
+	var freed_world: Node = s.world_root
+	var freed_player: Node = s.player
+	var grade_material: ShaderMaterial = w._mat
+
+	s.end_session()
+
+	# §9.1's write-trigger table lists end_session(), and §9.1's rule is that a
+	# write is a dirty flag flushed off the physics frame. Asserted and then
+	# CLEARED: GameState._process() would otherwise autosave over the developer's
+	# real slot 0 on the next frame, which this check awaits two of.
+	h.expect(gs._dirty, "end_session() flushes a save through §9.1's dirty flag")
+	gs._dirty = false
+
+	h.expect(d.player == null, "end_session() leaves the resolver holding no player (§12·12)")
+	h.expect(d.zone_manager == null, "and no zone manager")
+	h.expect(
+		zm.bound_world == null and zm.bound_player == null,
+		"ZoneManager is unbound from the subtree about to be freed (§12·12)"
+	)
+	h.expect(
+		w._mat == null and grade_material != null,
+		"Weirdness is unbound from the freed grade's material (§12·12, §12·35)"
+	)
+	h.expect(s.world_root == null and s.player == null, "SessionDirector drops its own two handles")
+	h.expect(
+		ev._active.is_empty() and ev._incoming.is_empty(),
+		"RuntimeEvents is cleared, so nothing published by the quitting session survives (§3.3)"
+	)
+	h.expect_eq(
+		audio.zone_calls, [&"bgm_menu"] as Array[StringName],
+		"the menu rack is what plays after a session ends (§3.3)"
+	)
+
+	# `queue_free()` is §3.3's own choice — its caller is a menu button's signal
+	# handler — so the frame it defers to is what this awaits. Two of them: the
+	# first services the deletion queue, the second is where a leaked reference
+	# would show up as a call into freed memory.
+	await process_frame
+	await process_frame
+	h.expect(not is_instance_valid(freed_world), "the world root is actually freed (§12·12)")
+	h.expect(not is_instance_valid(freed_player), "and the player with it")
+	var orphans: Array[CanvasItem] = []
+	_collect_grade_carriers(root, shader, orphans)
+	h.expect(
+		orphans.is_empty(),
+		"no grade survives the session that made it — a second one is what §12·35 forbids"
+	)
+
+	# "...and begin_session() immediately after it produces a playable state."
+	await s.begin_session()
+	h.expect_eq(zm.mount_calls, 2, "a re-begun session mounts its zone again")
+	var rebound: Array[CanvasItem] = []
+	_collect_grade_carriers(root, shader, rebound)
+	h.expect_eq(rebound.size(), 1, "and still exactly one node carries the shader (§12·35)")
+	if rebound.size() == 1:
+		h.expect_eq(w._mat, rebound[0].material, "Weirdness re-binds to the new grade")
+	for _i in fade_ticks:
+		_tick(d)
+	h.expect_eq(
+		s.player.state, PlayerController.State.FREE,
+		"the re-begun session is playable, not stuck in ZONE_TRANSITION (§12·12)"
+	)
+
+	# Shared state, for any real frame after the suite finishes: end the session,
+	# drop the stubs the shipped game would never have, and undo the checkpoint
+	# this check wrote.
+	s.end_session()
+	gs._dirty = false
+	s.zone_manager = null
+	s.audio_director = null
+	zm.free()
+	audio.free()
+	t.set_opaque(false)
+	gs.new_game()
+
+
+## The nearest `CanvasLayer` above a node, walked rather than queried: Godot 4.7
+## exposes no `get_canvas_layer()` on `CanvasItem`, and the walk answers the
+## question Doc 01 §2.1 actually asks — which layer is the grade drawn on —
+## whether row 2.2 parents it directly or nests it.
+func _canvas_layer_of(n: Node) -> CanvasLayer:
+	var p := n.get_parent()
+	while p != null:
+		if p is CanvasLayer:
+			return p
+		p = p.get_parent()
+	return null
+
+
+## Every `CanvasItem` in the tree whose material runs the weirdness shader.
+## Recursive from `root`, because §12 check 35 is a statement about the whole
+## tree: the bug it catches is a grade in a zone scene or one left behind by a
+## previous session, neither of which is anywhere near the real one.
+func _collect_grade_carriers(n: Node, shader: Shader, out: Array[CanvasItem]) -> void:
+	if n is CanvasItem:
+		var mat := (n as CanvasItem).material
+		if mat is ShaderMaterial and (mat as ShaderMaterial).shader == shader:
+			out.append(n)
+	for child in n.get_children():
+		_collect_grade_carriers(child, shader, out)
 
 
 ## The autoload's own tick. Statically typed as `Node`,

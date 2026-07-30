@@ -33,10 +33,16 @@ CutsceneDirector="*res://autoload/cutscene_director.gd"
 ; reaches nothing, so its position matters only in that it is ABOVE the resolver,
 ; which calls it (§4.5).
 TransitionDirector="*res://autoload/transition_director.gd"
-; Doc 00 §2.2 places RuntimeDirector twelfth and LAST. Rows 0.11, 0.12, 2.3 and
-; 3.2 insert AudioDirector, Cutscene/TransitionDirector, ZoneManager and
-; SessionDirector ABOVE this line, never below it: the resolver reaches for all
-; of them, and an autoload may only reference autoloads registered above it.
+; §2.2 places SessionDirector eleventh, immediately above RuntimeDirector. The
+; ZoneManager slot (tenth) is still empty until row 2.3, so the same
+; packing-upward rule as the comments above applies — what the table fixes is the
+; ORDER of what exists. SessionDirector resolves ZoneManager and AudioDirector by
+; node path precisely because they are not here yet.
+SessionDirector="*res://autoload/session_director.gd"
+; Doc 00 §2.2 places RuntimeDirector twelfth and LAST. Rows 2.3 and 3.2 insert
+; ZoneManager and AudioDirector ABOVE this line, never below it: the resolver
+; reaches for both, and an autoload may only reference autoloads registered above
+; it during _ready().
 RuntimeDirector="*res://autoload/runtime_director.gd"
 
 [display]

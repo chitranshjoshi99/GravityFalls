@@ -83,11 +83,12 @@ func begin_session() -> void:
 	#     zone: three resident zones would mean three chained backbuffer copies
 	#     with only one of them actually driven (Doc 3 §2.3 says the same).
 	#
-	#     Found recursively rather than through §3.2's flat
-	#     `world_root.get_node(^"WeirdnessGrade")`: Doc 01 §2.1 puts the ColorRect
-	#     on its own CanvasLayer, so it is a GRANDCHILD and the flat path cannot
-	#     resolve it. The recursive find accepts both shapes, so row 2.2 may
-	#     author either without editing this file.
+	#     Found recursively, which is now what §3.2 itself says: Doc 01 §2.1 puts
+	#     the ColorRect on its own CanvasLayer at layer 100, so it is a GRANDCHILD,
+	#     and §3.2's original flat `get_node(^"WeirdnessGrade")` could not resolve
+	#     the node §2.1 specifies. Row 0.12 found that and the doc was corrected.
+	#     The recursive find accepts both shapes, so row 2.2 may author either
+	#     without editing this file.
 	var grade := world_root.find_child(GRADE_NAME, true, false)
 	if grade is CanvasItem and grade.material is ShaderMaterial:
 		Weirdness.bind(grade.material)
@@ -158,20 +159,20 @@ func end_session() -> void:
 	RuntimeDirector.player = null
 	RuntimeDirector.zone_manager = null
 	if zone_manager != null:
-		# §3.3 does not name this and it must happen anyway: ZoneManager holds
-		# `_world_root` and `_player` (Doc 3 §3.2), both about to be freed, and
-		# check 12 admits no exceptions.
+		# §3.3 step 3. ZoneManager holds `_world_root` and `_player` (Doc 3 §3.2),
+		# both about to be freed, and check 12 admits no exceptions. Row 0.12 found
+		# that §3.3 named neither this nor the unbind below; both are in the doc now.
 		# ponytail: unbinding is all row 0.12 can do. Freeing the resident zone
-		# instances and clearing `_live`/`_loading` is row 2.3's teardown, in the
-		# file that owns those dictionaries.
+		# instances and clearing `_live`/`_loading` is the rest of step 3 and
+		# belongs to row 2.3, in the file that owns those dictionaries.
 		zone_manager.bind(null, null)
 
 	CombatDirector.reset()
 	Weirdness.set_zone_floor(0.0)
-	# Also not in §3.3's list, and required by check 12's spirit: the material
-	# belongs to the grade in the subtree below, so leaving it bound would leave
-	# `Weirdness` driving a shader on a freed node's resource across the whole
-	# menu. `bind()` on the next session's grade is what re-arms it.
+	# §3.3 step 5: the material belongs to the grade in the subtree below, so
+	# leaving it bound would leave `Weirdness` driving a shader on dead scenery for
+	# the whole time the menu is up. `bind()` on the next session's grade (§3.2
+	# step 1b) is what re-arms it.
 	Weirdness.bind(null)
 
 	# "RuntimeEvents is cleared." Two swaps drain both buffers — the queue's only

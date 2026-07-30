@@ -333,7 +333,16 @@ func begin_session() -> void:
 	#     once, to the single ColorRect on world_root. NOT per zone: three
 	#     resident zones would mean three chained backbuffer copies with only one
 	#     of them actually driven.
-	Weirdness.bind(world_root.get_node(^"WeirdnessGrade").material)
+	#
+	#     Found RECURSIVELY, not by a flat child path. Doc 1 §2.1 puts the grade
+	#     on its own CanvasLayer at layer 100, which makes it a GRANDCHILD of
+	#     world_root — a flat `get_node(^"WeirdnessGrade")` cannot resolve the node
+	#     §2.1 specifies, and this line said exactly that until tracker row 0.12
+	#     tried to run it. The recursive find resolves either shape, so Doc 1 §2.1
+	#     remains the single authority on where the grade sits and this line does
+	#     not move when it does.
+	var grade := world_root.find_child("WeirdnessGrade", true, false)
+	Weirdness.bind((grade as CanvasItem).material)
 
 	# 2. Player exists before any zone does, so triggers never fire into a null.
 	player = PLAYER_SCENE.instantiate()
@@ -367,7 +376,17 @@ The player is instantiated **before** the first zone so that destination `Area2D
 
 ### 3.3 `end_session()`
 
-Quit to Menu, or the credits. Flush a save (§9.3), free `world_root`, `CombatDirector.reset()`, `Weirdness.set_zone_floor(0.0)`, `AudioDirector.set_zone(&"bgm_menu")`, then load the menu scene. `RuntimeEvents` is cleared. No gameplay autoload holds a reference to a freed node afterward — §12 check 12 proves it.
+Quit to Menu, or the credits. **Unbind first, free last** — nothing is ever left pointing at a half-freed subtree:
+
+1. `GameState.mark_dirty()`. §9.1's write-trigger table lists `end_session()`, and §9.1's rule is that every write is a deferred flag flushed in `_process()`, off the physics frame. This is the flush; there is no second, direct `save_slot()` path that could disagree with the autosave about what a save is.
+2. `RuntimeDirector.player = null` and `RuntimeDirector.zone_manager = null`.
+3. **`ZoneManager` is unbound** from the world root and player it holds (Doc 3 §3.2's `_world_root` / `_player`), and frees its resident zone instances.
+4. `CombatDirector.reset()`, then `Weirdness.set_zone_floor(0.0)`.
+5. **`Weirdness` is unbound from the grade's material.** The material belongs to the `ColorRect` in the subtree about to be freed, so leaving it bound leaves `Weirdness` driving a shader on dead scenery for the whole time the menu is up. The next session's `bind()` (§3.2 step 1b) is what re-arms it.
+6. `RuntimeEvents` is cleared, so nothing the quitting session published can resolve into the next one.
+7. `AudioDirector.set_zone(&"bgm_menu")`, `world_root` is freed, and the menu scene loads.
+
+No gameplay autoload holds a reference to a freed node afterward — §12 check 12 proves it, and steps 3 and 5 exist because that check fails without them. (Steps 1, 3 and 5 were corrected at tracker row 0.12: this section previously cited §9.3 — which is about blackouts, not saves — and named neither unbind.)
 
 ---
 
@@ -1287,6 +1306,8 @@ Automated Godot headless tests must prove:
 40. Every gameplay action named in Doc 2 §3.5 resolves to at least one `InputMap` event at boot, **including `journal`, `uv_light`, and `scan` before they are earned** — verbs are gated at the resolver, never by leaving an action unbound.
 
 Checks 1–3, 6, 14, 34, 35, and 39 need a real scene tree; run them from a small `res://tests/scene_harness.tscn` driven by `Engine.get_physics_frames()`. The rest run from the pure harness above. Both are entered from the one suite, `res://tests/test_all.gd`.
+
+**"A real scene tree" is not the same as that scene.** A `--script` run *is* a real `SceneTree`: it has a `root`, it instantiates every autoload, and nodes added to `root` are genuinely in the tree with live materials and working tweens. What it lacks is a physics server that has stepped, a rendering server that has drawn, and a main scene. So a check needing only real nodes runs from the suite directly — check 35 does, and did from tracker row 0.12 — and `scene_harness.tscn` is for the checks that need what a `--script` run cannot give: `get_overlapping_areas()`, collision, a camera, or a frame that has actually been drawn. Building the scene earlier than that buys nothing and gives the suite a second entry point to keep in step.
 
 ---
 

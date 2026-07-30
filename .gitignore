@@ -1,8 +1,11 @@
 # Godot 4
 .godot/
 /android/
-export_presets.cfg
 *.translation
+
+# export_presets.cfg IS tracked: tracker row 0.2 makes the tests//tools/ export
+# filter a day-one deliverable, and this preset carries no credentials
+# (codesign and notarization are both off).
 
 # Exports / builds
 build/

@@ -1,0 +1,53 @@
+; Engine configuration file.
+; Doc 01 §0 locks the three display values below. They are set here once and
+; restated nowhere else: Doc 03's CELL grid and Doc 04's absolute pixel layout
+; are both authored against a true 1920x1080 canvas, and `keep` is what makes
+; that canvas honest on the 16:10 panels this game targets.
+
+config_version=5
+
+[application]
+
+config/name="Gravity Falls"
+config/features=PackedStringArray("4.4")
+
+[autoload]
+
+; Doc 00 §2.2's registration order is load-bearing: an autoload may only
+; reference autoloads registered above it during _ready().
+Tokens="*res://autoload/tokens.gd"
+Weirdness="*res://autoload/weirdness.gd"
+Settings="*res://autoload/settings.gd"
+GameState="*res://autoload/game_state.gd"
+RuntimeEvents="*res://autoload/runtime_events.gd"
+; §2.2 puts AudioDirector sixth and CombatDirector seventh. AudioDirector does
+; not exist until row 3.2, so CombatDirector simply takes the next line — the
+; table fixes the ORDER of what exists, and a placeholder for a missing autoload
+; would be a file that boots nothing.
+CombatDirector="*res://autoload/combat_director.gd"
+; §2.2 places CutsceneDirector eighth, immediately after CombatDirector — the
+; same packing-upward rule as the comment above.
+CutsceneDirector="*res://autoload/cutscene_director.gd"
+; §2.2 places TransitionDirector ninth, immediately after CutsceneDirector — the
+; same packing-upward rule as the two comments above. It is presentation only and
+; reaches nothing, so its position matters only in that it is ABOVE the resolver,
+; which calls it (§4.5).
+TransitionDirector="*res://autoload/transition_director.gd"
+; §2.2 places SessionDirector eleventh, immediately above RuntimeDirector. The
+; ZoneManager slot (tenth) is still empty until row 2.3, so the same
+; packing-upward rule as the comments above applies — what the table fixes is the
+; ORDER of what exists. SessionDirector resolves ZoneManager and AudioDirector by
+; node path precisely because they are not here yet.
+SessionDirector="*res://autoload/session_director.gd"
+; Doc 00 §2.2 places RuntimeDirector twelfth and LAST. Rows 2.3 and 3.2 insert
+; ZoneManager and AudioDirector ABOVE this line, never below it: the resolver
+; reaches for both, and an autoload may only reference autoloads registered above
+; it during _ready().
+RuntimeDirector="*res://autoload/runtime_director.gd"
+
+[display]
+
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"

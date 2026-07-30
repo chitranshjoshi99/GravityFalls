@@ -1,0 +1,46 @@
+{
+  "requirement": "Implement Build Tracker rows 0.4 and 0.5: the shared token/resource layer plus capsule and eye geometry helpers.",
+  "workspace": "/Users/chitranshjoshi/Work/GravityFalls",
+  "checkpointEvery": 3,
+  "approvalCheckpoints": false,
+  "architecture": {
+    "decision": "Keep authored data in .tres resources and procedural math in core class_name helpers; Tokens remains the Doc 00-required autoload for globally shared, immutable constants.",
+    "alternatives": ["Place palette and proportion values in the Tokens singleton", "Duplicate geometry formulas in rig scenes"],
+    "tradeoffs": ["Resources keep per-zone/per-character overrides inspectable and serializable; static helpers make shared geometry deterministic and easy to test."],
+    "seams": ["Palette owns colors and ambient weirdness only; Weirdness owns the global grade in tracker row 0.6.", "CharacterProportions provides segment dimensions; Tube and Eyes consume raw values without scene dependencies.", "tests/test_all.gd remains the sole test-suite entry point."]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "trackerRow": "0.4",
+      "title": "Create the shared token and resource layer",
+      "intent": "Make the Doc 01 color palette and humanoid proportions available as reusable Godot Resources, with Tokens registered as the constants autoload.",
+      "ownership": ["autoload/tokens.gd", "core/palette.gd", "core/character_proportions.gd", "resources/palettes/pal_woods.tres", "resources/proportions/prop_dipper.tres", "project.godot", "tests/test_all.gd"],
+      "constraints": ["Use the locked Doc 01 values and names.", "Do not implement Weirdness; it is tracker row 0.6.", "Keep test failures explicit through RuntimeHarness rather than bare assert()."],
+      "acceptance": "Tokens autoloads, Palette and CharacterProportions are loadable resources, pal_woods.tres loads with its woods baseline, and Dipper's shared segment stack remains within the Doc 01 §11 tolerance of declared height.",
+      "verify": ["godot --headless --script res://tests/test_all.gd"],
+      "visual": null,
+      "dependsOn": [],
+      "status": "completed",
+      "result": "Tokens is registered as an autoload; pal_woods.tres and prop_dipper.tres load through their typed resources; the Doc 01 segment-stack tolerance holds.",
+      "evidence": ["godot --headless --script res://tests/test_all.gd (exit 0; 11 checks passed)"],
+      "error": null
+    },
+    {
+      "id": "T2",
+      "trackerRow": "0.5",
+      "title": "Create deterministic tube and eye geometry helpers",
+      "intent": "Provide the one-polygon hose capsule, blend weights, UV helpers, and clamped touching-eye math that rigs later consume.",
+      "ownership": ["core/tube.gd", "core/eyes.gd", "tests/test_all.gd"],
+      "constraints": ["Tube shaft subdivisions must preserve four or more vertices in the elbow blend band.", "Use one continuous capsule, never separate upper/fore-limb geometry.", "Keep all geometry scene-independent and class_name-addressable."],
+      "acceptance": "Doc 01 §11 capsule bounds, winding/vertex-count, UV, weight-partition, blend-band, and pupil-containment checks pass.",
+      "verify": ["godot --headless --script res://tests/test_all.gd"],
+      "visual": null,
+      "dependsOn": ["T1"],
+      "status": "completed",
+      "result": "Tube and Eyes provide deterministic capsule/UV/weight and eye/pupil geometry; the 28-vertex default places six vertices in the required blend band.",
+      "evidence": ["godot --headless --script res://tests/test_all.gd (exit 0; 147 checks passed)"],
+      "error": null
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+{
+  "requirement": "Tracker row 0.11 — build the CombatDirector, CutsceneDirector and TransitionDirector autoloads (Doc 00 §2.3, §7.4, §8), register them above RuntimeDirector, wire the resolver stubs that name row 0.11, and prove the row's Verify column plus Doc 00 §12 checks 23 and 28 in tests/test_all.gd.",
+  "repo": "/Users/chitranshjoshi/Work/GravityFalls",
+  "trackerRow": "0.11",
+  "checkpointEvery": 3,
+  "priorState": "Rows 0.1-0.10 Done. Suite green at 253 checks. RuntimeDirector exists and is pure; it reaches other systems through two nullable handles (player, zone_manager) and carries six `ponytail:` comments naming row 0.11.",
+  "toolchain": {
+    "godot": "4.7.1",
+    "testCommand": "godot --headless --script res://tests/test_all.gd",
+    "gate": "Exit 0 is NOT sufficient — Godot exits 0 when test_all.gd fails to parse. Green means the run also printed `test_all: N checks passed` with N greater than the previous row's count and zero FAIL lines."
+  },
+  "architecture": {
+    "decision": "Three separate autoloads as Doc 00 §2.2's table declares, registered immediately above RuntimeDirector. Every gameplay mutation stays inside RuntimeDirector._resolve(); the three directors own only their own domain state. Cutscene completion is POLLED by the resolver at priority 6 rather than signalled back, so no new RuntimeEvent.Type value is added and no autoload writes player state.",
+    "alternatives": [
+      "Fold all three into RuntimeDirector now (tracker D18). Rejected: D18 is explicitly deferred until after P6, and the resolver's purity contract (no tween, no await, no Input) forbids TransitionDirector's overlay tween living in that file.",
+      "Add a CUTSCENE_COMPLETE value to RuntimeEvent.Type and have CutsceneDirector publish it. Rejected: amends Doc 00 §2.5's authored enum for one internal handoff, and the enum's comment says a rename or reorder is a silent breakage.",
+      "CutsceneDirector emits `finished` and RuntimeDirector commits from the signal handler. Rejected: a gameplay commit outside _resolve() breaks the §4.1 tick contract and cannot be stepped by the §12 harness."
+    ],
+    "seams": [
+      "S1 — project.godot registration order: CombatDirector, CutsceneDirector, TransitionDirector all go ABOVE RuntimeDirector. The AudioDirector, ZoneManager and SessionDirector slots in §2.2's table stay empty until rows 3.2, 2.3 and 0.12.",
+      "S2 — §14.1 holds: only RuntimeDirector mutates gameplay state. CombatDirector owns threat/boss/aggro (its own domain), CutsceneDirector owns the queue and the active config, TransitionDirector owns pixels and nothing else. None of the three writes player.state, GameState, or Weirdness.",
+      "S3 — CutsceneDirector.take_finished() is the handoff. The resolver polls it at priority 6, then writes on_complete_flag, returns the player to FREE, and enqueues on_complete_intent so it resolves next tick through its own priority row (§8.2.1).",
+      "S4 — CutsceneDirector.request() validates and enqueues CUTSCENE_REQUEST; the resolver remains the acceptor, preserving §8.1 steps 1-2. request() rejects an on_complete_intent outside the three permitted types AT REQUEST TIME (§12 check 23).",
+      "S5 — every duration in the three directors is a physics-tick count derived from a float constant (§2.4). TransitionDirector is the one place a tween is legal, because it is presentation only, and it must expose no method that reads or writes gameplay state.",
+      "S6 — CombatDirector.THREAT_LINGER is Doc 4 §2.7's IDLE_HIDE_DELAY. HudVisibility does not exist (tracker D9), so the float is inlined here with a guard check that fires the day row 3.5 creates the class with a different value."
+    ],
+    "adr": null,
+    "note": "The doc constrains this design heavily — §2.2 names three autoloads, §14.1 names the one committer — so the only genuinely open fork was the completion handoff, settled above rather than in a full ADR."
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Add the CombatDirector autoload",
+      "intent": "Doc 00 §2.3's aggro set, threat_active with its linger, boss_active/boss_id/boss_phase, reset(), the §11.3 encounter restore, and the named phase-setup registry the resolver looks up. This is the row's first Verify half: threat_active lingers after aggro empties.",
+      "files": ["autoload/combat_director.gd", "project.godot", "tests/test_all.gd"],
+      "constraints": "Seams S1, S2, S5, S6. process_physics_priority = 50, asserted in _ready() like RuntimeDirector's 100. No player state, no GameState, no AudioDirector reference.",
+      "acceptance": "threat_active is true while aggro is non-empty and stays true for THREAT_LINGER ticks after it empties; a freed enemy cannot pin it true forever; boss_phase changes only through the director's own API and emits boss_phase_changed; reset() clears everything; has_phase_setup() answers for the resolver.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": [],
+      "status": "done",
+      "result": "autoload/combat_director.gd added and registered above RuntimeDirector; suite green at 297 checks (was 253). Verified independently: threat linger, the freed-enemy prune, one writer of boss_phase, reset, §11.3 restore, phase-setup registry, and the D9 HudVisibility drift guard.",
+      "deviations": [
+        "Doc 00 §2.3's `const THREAT_LINGER := HudVisibility.IDLE_HIDE_DELAY` cannot compile: HudVisibility is Doc 04 §2.7, tracker Deferred D9, and arrives at row 3.5. The float 4.0 is inlined with a `ponytail:` naming 3.5, and the suite asserts the two agree the moment that file appears.",
+        "Doc 00 §2.3 declares `_aggro`'s value as `ticks since last aggro` and nothing in any document reads it — de-aggro is an explicit `deregister_aggro()` call, so there is no per-enemy timeout for a counter to drive. Stored as a Dictionary-as-set; row 4.3 owns a decay if the first real enemy wants one.",
+        "DOC DRIFT, worth fixing before rows 3.5/4.4/4.6: Doc 04 §2.7 and §3.2 and Doc 06 §5.4 and §7 all ASSIGN `CombatDirector.boss_active`, `boss_phase` and `threat_active` directly in their snippets. That contradicts §2.3's single-writer intent — a direct `boss_phase = 2` skips `boss_phase_changed`, so Doc 05 §4.2's stem gate never hears it. Those call sites must be re-authored as `begin_boss()` / `set_boss_phase()`.",
+        "§11.3's `register_phase_setup(name, setup)` shadows `Node.name` and warns on every parse; the parameter is `setup_name`. The call shape is unchanged.",
+        "Row 0.11's second Verify half — `boss_phase` is the sole stem gate — is only half-checkable today: AudioDirector arrives at row 3.2. What is asserted now is one writer of the field plus a static scan proving combat_director.gd names no audio identifier. Consequence: that file's comments deliberately avoid the words `stem` and `bus` so the scan stays a plain text search."
+      ]
+    },
+    {
+      "id": "T2",
+      "title": "Add the CutsceneDirector autoload",
+      "intent": "Doc 00 §8's queued/active cutscenes: request() validates the config and enqueues CUTSCENE_REQUEST, begin() takes the accepted one active, complete() marks it finished, take_finished() hands it to the resolver. Rejects an on_complete_intent outside §8.2.1's three permitted types at request time.",
+      "files": ["autoload/cutscene_director.gd", "project.godot", "tests/test_all.gd"],
+      "constraints": "Seams S1, S2, S3, S4. Never sets player.state and never writes GameState — the resolver does both. Dialogue, camera and the typewriter belong to row 3.6.",
+      "acceptance": "request() with a permitted on_complete_intent returns true and enqueues exactly one CUTSCENE_REQUEST; an intent outside the three is rejected with push_error and enqueues nothing; take_finished() returns the finished config exactly once and an empty Dictionary after.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T1"],
+      "status": "done",
+      "result": "autoload/cutscene_director.gd added and registered between CombatDirector and RuntimeDirector; suite green at 339 checks (was 297). Verified independently: the §8.2.1 intent gate rejects at request time and leaves the queue untouched, begin() refuses an id that was never requested, and take_completed() is consume-once and hands back a copy.",
+      "deviations": [
+        "Doc 00 §8.1 step 5 says CutsceneDirector sets the player to CUTSCENE. That is the direct mutation §8.4 deletes DialogueLine.pause_player for, and §14.1 forbids. The resolver already sets it at priority 6; CutsceneDirector sets no state, and the suite scans its source text to keep it that way.",
+        "Doc 00 §8 defines no completion path at all — no event type, no signal, no method — yet §8.2.1 requires the resolver to write on_complete_flag and enqueue on_complete_intent on completion. Filled by seam S3's polled complete()/take_completed() pair. §8 should name it.",
+        "Doc 00 §7.7 assigns the 0.15 s arrival wait to CutsceneDirector, but RuntimeDirector already owns ARRIVAL_GRACE_TICKS and counts it in _tick_durations(). Enforcing it in the director would be a second counter (§0.1, §2.4) and a gameplay gate outside the resolver (§14.1). Built as the marker half only; the resolver's half is T4.",
+        "DOC ADDITION: §8.2's config sketch has no field for §7.7 to key on, so `&\"arrival_story\": bool` was added and is carried into the CUTSCENE_REQUEST payload beside `&\"id\"`. §8.2 should gain the field and §7.7's enforcement clause should move to the resolver.",
+        "§8.2's `skippable` has no reader anywhere in Doc 00. Stored unread; row 3.8's chapter card is the first thing that honours it."
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "Add the TransitionDirector autoload",
+      "intent": "Doc 00 §7.4's overlay: set_opaque(), play_fade(ticks) and play_fade_in(ticks) over a full-rect ColorRect on its own high CanvasLayer. Presentation only — it mirrors the resolver's lock countdown and has no authority over it.",
+      "files": ["autoload/transition_director.gd", "project.godot", "tests/test_all.gd"],
+      "constraints": "Seams S1, S2, S5. Durations arrive as tick counts and are converted to seconds with the same TICK constant; the tween is legal here and only here. No gameplay read or write of any kind.",
+      "acceptance": "The overlay exists at boot fully transparent and never blocks mouse input; set_opaque(true) is immediate; play_fade_in(ticks) tweens to transparent over ticks * TICK seconds; a static read of the file finds no reference to player, GameState, RuntimeEvents or Weirdness.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T2"],
+      "status": "done",
+      "result": "autoload/transition_director.gd added and registered above RuntimeDirector; suite green at 376 checks (was 339). Verified independently: it extends CanvasLayer at Doc 04 §0's layer 30, the overlay starts transparent with MOUSE_FILTER_IGNORE and full-rect anchors, set_opaque is immediate, both fades are stepped with custom_step and assert an intermediate point, one tween writes the alpha, and the source-text scan proves the file names no gameplay system and no duration literal.",
+      "deviations": [
+        "Doc 00 §4.5's snippet names one method, play_fade(FADE_TICKS), while §7.4's prose describes three visuals (step 4 out, step 5 hold, step 7 in) and §7.4.1/§7.6 call the same thing a wipe. One method with three caller-supplied tick counts, per the row's decision; the doc never states this and it is inferable only from the snippet.",
+        "Doc 00 §3.2 step 5 calls play_fade_in() and nothing but step 4's set_opaque(true) makes the overlay opaque first. Implemented as tween-from-current alpha, which degenerates correctly whether or not step 4 ran.",
+        "Doc 00 §2.2 gives TransitionDirector no process_physics_priority, consistent with presentation-only. It has no _physics_process, so unlike CombatDirector there is no priority to pin or assert.",
+        "Doc 00 §12 check 20 as phrased — the four lock releases hold with the fade tween stubbed out entirely — was already proved by row 0.10 when no overlay existed to stub. The durable half added here is the reverse direction: this file cannot reach gameplay even if it wanted to. T4 wires the call, and the check stays honest because the resolver still counts ticks."
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "Wire the resolver's row-0.11 stubs to the three directors",
+      "intent": "Replace RuntimeDirector's six `ponytail:` comments that name row 0.11 with the real calls: respawn resets or restores combat per §11.3, the teardown's clear_combat lands, gated travel plays its fade, and priority 6 begins and completes a cutscene including on_complete_flag and on_complete_intent (§8.2.1) plus §7.7's arrival grace. Also reject an ENCOUNTER_STATE_REQUEST naming an unregistered setup (§12 check 28).",
+      "files": ["autoload/runtime_director.gd", "tests/harness.gd", "tests/test_all.gd"],
+      "constraints": "Seams S2, S3. The resolver stays pure: no await, no create_tween, no get_tree().create_timer, no Input.* may appear in runtime_director.gd. Every mutation stays inside _resolve()/_tick_durations(). Do not touch the fifteen-rung order or any behaviour rows 0.1-0.10 already assert.",
+      "acceptance": "A respawn with an empty checkpoint encounter resets combat; one with an encounter block restores boss_active/boss_id/boss_phase; a teardown declaring clear_combat clears them; a committed cutscene begins in CutsceneDirector and its completion writes on_complete_flag, returns the player to FREE and enqueues on_complete_intent, which then resolves through its own row next tick and is cancelled by same-tick damage; an arm naming an unregistered setup is refused rather than written; the whole existing suite still passes.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T3"],
+      "status": "done",
+      "result": "All six of row 0.10's `ponytail:` deferrals naming row 0.11 are closed in autoload/runtime_director.gd, and tests/harness.gd resets all three directors so check order still cannot change a result. Suite green at 446 checks (was 376). Verified independently: the resolver still contains no await, create_tween, get_tree().create_timer or Input. outside comments, and the three director files were not modified (mtimes all predate the first resolver edit).",
+      "deviations": [
+        "Doc 00 §8.1 step 6 has no completion sentinel: CutsceneDirector.take_completed() returns {} for `nothing finished`, which is indistinguishable from a cutscene authored with an empty config. The resolver's poll is therefore two-armed — a non-empty handoff, OR the player sitting in CUTSCENE while the director holds nothing active. Giving the director a `has_completed()` would let the second arm go; deliberately not done, because editing a verified file was out of this task's scope.",
+        "Doc 00 §8.1 step 6 says a completion returns the player to FREE, and §4.2 row 4 lets damage commit at priority 4 on that same tick, leaving the player already HURT. Forcing FREE would erase the hit, so the return is guarded on `state == CUTSCENE` and row 4.1's recovery returns control in that case. The doc names neither the conflict nor the resolution.",
+        "Doc 00 §7.4 step 9 and §11.2 step 9 imply an arrival story may be requested during a transition, but §6.3 and §11.1 discard anything published behind an opaque overlay, so `_defer_survivors()` drops it rather than deferring it. §7.7's grace therefore only ever refuses a request authored AFTER release. The step ordering implies this and never states it.",
+        "Doc 00 §11.2 step 5 lumps the combat reset and the ordinary-enemy respawn into one step, so the step is now half-delivered. The `ponytail:` comment splits it: combat is row 0.11's and landed, enemies are row 2.7's."
+      ]
+    }
+  ]
+}

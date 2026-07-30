@@ -34,9 +34,18 @@ If a number appears in this document without a citation, this document owns it.
 
 Docs 1–5 contain illustrative snippets that mutate state directly from Godot callbacks. Those snippets are superseded here. The *design intent* of each is preserved exactly; only the call path changes.
 
+**This table is a changelog, not a mechanism.** Every row below has been applied *in place* in the source document as well — Docs 1–5 no longer contain the superseded text. That rule exists because the halfway position is where drift hides: superseding `PlayerController.State` while leaving Doc 2's `match` statement consuming the old six values produced a controller that silently coasted through four states, inside a section already marked superseded and therefore already looking handled. A builder reading Doc 2 top to bottom must never find a superseded-notice comment sitting above text that is still wrong. **Anything this document supersedes gets fixed at the source and recorded here — never referenced and left standing.**
+
 | Superseded | Replaced by | Nature of change |
 |---|---|---|
-| Doc 2 §3.3 `PlayerController.State` (6 states) | §5.1 (10 states) | Adds `ATTACKING`, `DRIVING`, `ZONE_TRANSITION`, `BLACKOUT` |
+| Doc 2 §3.3 `PlayerController.State` (6 states) | §5.1 (10 states) | Adds `ATTACKING`, `DRIVING`, `ZONE_TRANSITION`, `BLACKOUT` — **and Doc 2's `_physics_process` `match` now has an arm for each** |
+| Doc 2 §3.5 `scan` bound to "Hold J + `attack`" | Doc 2 §3.5 | `InputMap` has no chord action. `scan` is a first-class action on `Left Shift` / RT |
+| Doc 2 §5.4 `Scanner._best_target()` polling bodies | Doc 2 §5.4 | Scannables are `Area2D`s; `get_overlapping_bodies()` could never return one |
+| Doc 4 §2.1 HUD reading `GameState.health` / `.stamina` | Doc 4 §2.1, §14 below | Live state belongs to the player node, not the persistence autoload |
+| Doc 1 §2.1 `Weirdness.level` as the value systems read | Doc 1 §2.1 | Split into `target_level` (where the tween is headed) and `applied` (where it is) |
+| Doc 3 §1.1 `ZoneDef.seam_chapter` | Doc 3 §1.1 `SeamLink` | Per-edge data moved off the per-zone field |
+| Doc 3 §2.1 `WeirdnessGrade` in the per-zone layer stack | Doc 1 §2.1, §3.2 below | Exactly one grade, on `world_root`, bound by `begin_session()` |
+| Doc 5 §7.1 placeholder bake at startup | Doc 5 §7.1 | Moved offline to `tools/bake_placeholders.gd`; boot loads committed WAVs |
 | Doc 2 §5.2 `Journal.on_owner_damaged()` timer | §5.2, §2.4 | `create_timer` → resolver-counted ticks |
 | Doc 2 §7.1 `Health.take_damage()` i-frame timer | §2.4 | Same |
 | Doc 2 §8 `Interactor._unhandled_input()` direct `interact()` | §6.1 | Direct call → `INTERACT_REQUEST` |
@@ -102,6 +111,8 @@ Registration order is load-bearing: an autoload may only reference autoloads reg
 | 11 | `SessionDirector` | — | §3. Boot, world root, player instancing, session begin/end |
 | 12 | `RuntimeDirector` | **100** | §4. Priority resolution and cross-system sequencing |
 
+**`Journal` is deliberately absent from this table, and must stay absent.** It is a node on the player, reached as `RuntimeDirector.player.journal`. In Godot 4 an autoload named `Journal` and a `class_name Journal` collide on one global identifier and the engine errors, so `Journal.state` (instance) and `Journal.FUMBLE_DURATION` (constant) could never both resolve. The timings live in a static `JournalConst` (Doc 2 §5.2); the state lives on the node. Same rule for `Health` and `Stamina` — nodes on the player, never globals.
+
 **The priority numbers are not decoration.** Godot adds autoloads as root's first children, so by default they `_physics_process()` *before* the scene tree — the exact opposite of what §4's frame contract requires. `RuntimeDirector` must run after every body has moved and every trigger has published. Pin these values in each script's `_ready()`:
 
 ```gdscript
@@ -116,13 +127,15 @@ func _ready() -> void:
 Doc 4 §2.7 and §3.2 both read combat state that no document defined. It lives here.
 
 ```gdscript
-# res://runtime/combat_director.gd — Autoload "CombatDirector"
+# res://autoload/combat_director.gd — Autoload "CombatDirector"
 extends Node
 
 signal threat_changed(active: bool)
 signal boss_phase_changed(boss_id: StringName, phase: int)
 
-const THREAT_LINGER := 4.0          ## matches Doc 4's HUD idle-hide delay
+## Referenced, never copied — §0.1's rule applied to itself. A duplicated 4.0
+## here and in Doc 4 is two numbers that will drift the first time either moves.
+const THREAT_LINGER := HudVisibility.IDLE_HIDE_DELAY   ## Doc 4 §2.7
 
 var threat_active: bool = false      ## Doc 4 §2.7, §3.2 read this
 var boss_active: bool = false        ## replaces Doc 4's BossDirector.active
@@ -144,7 +157,7 @@ Doc 2 §5.2 and §7.1 use `get_tree().create_timer(...).timeout.connect(...)`. T
 
 ```gdscript
 const TICK := 1.0 / 60.0
-const FUMBLE_TICKS := int(round(Journal.FUMBLE_DURATION / TICK))   # Doc 2 §5.1 → 48
+const FUMBLE_TICKS := int(round(JournalConst.FUMBLE_DURATION / TICK))   # Doc 2 §5.1 → 48
 ```
 
 Durations are always derived from the owning document's float constant, never re-entered as an integer literal.
@@ -152,7 +165,7 @@ Durations are always derived from the owning document's float constant, never re
 ### 2.5 Event record
 
 ```gdscript
-# res://runtime/runtime_event.gd
+# res://core/runtime_event.gd
 class_name RuntimeEvent
 extends RefCounted
 
@@ -209,7 +222,7 @@ latency.** A swap has no such window: every event published between two resolves
 exactly one resolve.
 
 ```gdscript
-# res://runtime/runtime_events.gd — Autoload "RuntimeEvents"
+# res://autoload/runtime_events.gd — Autoload "RuntimeEvents"
 extends Node
 
 var _incoming: Array[RuntimeEvent] = []   ## publishers write here, any time
@@ -267,8 +280,11 @@ Nothing in Docs 1–5 mounts the first zone or creates the player. `SessionDirec
 
 ```text
 1. Autoloads _ready() in §2.2 order. No gameplay nodes exist yet.
-2. AudioDirector bakes procedural placeholders (Doc 5 §7.1). Blocking, <1 s.
+2. AudioDirector loads placeholder WAVs from res://assets/audio/ like any other
+   asset. Nothing is synthesised at runtime — Doc 5 §7.1 bakes offline.
 3. Settings.load() from user://settings.cfg. Applied before any UI draws.
+   Settings NEVER gates a gameplay verb: every action is bound here, and an
+   unearned verb is refused at the resolver (§4.2 rows 11-12), not left unbound.
 4. Main menu scene (Doc 4 §7.1). AudioDirector.set_zone(&"bgm_menu").
    "Continue" is hidden unless GameState.has_save().
 5. New Game  → GameState.new_game()
@@ -281,19 +297,27 @@ Nothing in Docs 1–5 mounts the first zone or creates the player. `SessionDirec
 ### 3.2 `begin_session()`
 
 ```gdscript
-# res://runtime/session_director.gd — Autoload "SessionDirector"
+# res://autoload/session_director.gd — Autoload "SessionDirector"
 extends Node
 
-const PLAYER_SCENE := preload("res://actors/dipper.tscn")
+const PLAYER_SCENE := preload("res://actors/player/dipper.tscn")
 const WORLD_SCENE := preload("res://world/world_root.tscn")
 
 var world_root: Node2D
 var player: PlayerController
 
 func begin_session() -> void:
-	# 1. World root: owns the §Doc 3 §2.3 parallax and hosts every zone instance.
+	# 1. World root: owns the Doc 3 §2.3 parallax, hosts every zone instance, and
+	#    carries THE one weirdness grade for the whole game.
 	world_root = WORLD_SCENE.instantiate()
 	get_tree().root.add_child(world_root)
+
+	# 1b. Bind the grade. Doc 1 §2.1 defines Weirdness.bind() and nothing called
+	#     it — the shader would have sat at its default forever. It binds here,
+	#     once, to the single ColorRect on world_root. NOT per zone: three
+	#     resident zones would mean three chained backbuffer copies with only one
+	#     of them actually driven.
+	Weirdness.bind(world_root.get_node(^"WeirdnessGrade").material)
 
 	# 2. Player exists before any zone does, so triggers never fire into a null.
 	player = PLAYER_SCENE.instantiate()
@@ -306,9 +330,12 @@ func begin_session() -> void:
 	CombatDirector.reset()
 
 	# 4. Mount behind an already-opaque overlay — no fade-out, we start black.
-	var cp := GameState.checkpoint
+	var cp := GameState.data.checkpoint
 	TransitionDirector.set_opaque(true)
-	await ZoneManager.mount_initial(cp.zone_id, cp.position)
+	# Marker first, raw coordinate only as a fallback (§9.2). A new game names a
+	# marker it cannot resolve until the zone instantiates, which is exactly why
+	# the marker — not a Vector2 — is what the checkpoint carries.
+	await ZoneManager.mount_initial(cp.zone_id, cp.spawn_marker, cp.position)
 	# activate_zone() has now committed palette, weirdness floor, and BGM.
 
 	# 5. Hand the lock to the resolver. It counts the fade in ticks and releases
@@ -351,10 +378,14 @@ Quit to Menu, or the credits. Flush a save (§9.3), free `world_root`, `CombatDi
 
 Step 1 has no ordering requirement, which is the point of §2.5's swap. Input is free to arrive in the idle frame; it will still be seen by exactly one resolve.
 
-Step 4b matters. Combat overlap is **polled**, not signal-driven, because signal arrival order relative to the resolver is not a guarantee Godot makes. `get_overlapping_areas()` at priority 100 is: it reflects the state of the world after everything moved this tick. §4.3's whole rule depends on it.
+Step 4b matters. Combat overlap is **polled**, not signal-driven, because signal arrival order relative to the resolver is not a guarantee Godot makes. Polling is.
+
+**Be precise about what polling gives you.** `get_overlapping_areas()` reflects the world as of the **last completed physics step** — Godot's physics server refreshes `Area2D` overlap lists during its own step, which runs *after* every `_physics_process` callback in the frame. `process_physics_priority = 100` orders this resolver relative to other *scripts*; it does not order it relative to the physics server, and no priority value can. So the resolver sees a hitbox on the tick **after** it arms.
+
+That is one tick of uniform staleness, accepted for exactly the reason §2.5's one-frame latency is accepted: it is deterministic, it applies to every combatant equally, and it is invisible at 60 Hz. What matters is that §4.3's rule is stated against the model that actually ships, not against a model where "this tick" means something the engine never promised — otherwise §12's checks encode the wrong expectation, pass against stubs, and disagree with live play.
 
 ```gdscript
-# res://runtime/runtime_director.gd — Autoload "RuntimeDirector" (skeleton)
+# res://autoload/runtime_director.gd — Autoload "RuntimeDirector" (skeleton)
 extends Node
 
 var player: PlayerController
@@ -439,9 +470,9 @@ Each `_try_*` returns `true` only if it committed. A committed higher priority e
 
 ### 4.3 "The hit arrived first"
 
-Combat overlaps are polled at step 5a, before any intent is committed. Therefore an enemy hitbox already overlapping Dipper in that physics tick wins and deals damage. If the dodge was committed in an earlier tick and its i-frame window (Doc 2 §3.4) is active when the hit resolves, the hit is ignored.
+Combat overlaps are polled at step 4b, before any intent is committed. An enemy hitbox that was overlapping Dipper **as of the last completed physics step** wins and deals damage. If a dodge was committed in an earlier tick and its i-frame window (Doc 2 §3.4) is active when the hit resolves, the hit is ignored.
 
-**A hit wins if it arrived first; an already-active dodge protects.** Animation call tracks remain the source of truth for hitbox activation and i-frame timing (Doc 2 §4.1).
+**A hit wins if it arrived first; an already-active dodge protects.** "Arrived first" means the overlap was already established when the resolver looked — a hitbox arming from an animation call track during frame *N* is seen at frame *N+1*, so a dodge input arriving in frame *N* beats it. That is correct and intended: the player reacted before the attack was live. Animation call tracks remain the source of truth for hitbox activation and i-frame timing (Doc 2 §4.1).
 
 Multiple damage sources in one tick resolve as one hit. Doc 2 §7.1's i-frame flag is set on the first commit, so the second is dropped in the same tick rather than stacking — the resolver relies on this rather than deduplicating separately.
 
@@ -616,7 +647,7 @@ At priority 13, `RuntimeDirector` verifies `PlayerController.State.FREE`, target
 | Node | Callback queues | Direct mutation it must not perform |
 |---|---|---|
 | `Checkpoint` | `CHECKPOINT_REACHED` | `GameState.set_checkpoint()` |
-| Boss phase controller | `ENCOUNTER_STATE_REQUEST` | `GameState.checkpoint.encounter` |
+| Boss phase controller | `ENCOUNTER_STATE_REQUEST` | `GameState.data.checkpoint.encounter` |
 | Journal text fields | `JOURNAL_SUBMIT_REQUEST` | `journal_overrides`, `ciphers_solved` |
 | `SecretTrigger` | `SECRET_REVEAL_REQUEST` | unlock entry, SFX, weirdness pulse |
 | `AnomalyField` | enter/exit facts | zone progression or Player state |
@@ -625,8 +656,15 @@ At priority 13, `RuntimeDirector` verifies `PlayerController.State.FREE`, target
 | `SeamBlocker` | `SEAM_FALLBACK_REQUEST` | transition start |
 | Enemy hitbox | polled, not queued (§4.3) | health subtraction or Journal fumble |
 | Story volume | `CUTSCENE_REQUEST` | dialogue start, camera seizure |
+| **`PlayerInput`** (one node on the player) | every player intent — `PAUSE_REQUEST`, `DODGE_REQUEST`, `ATTACK_REQUEST`, `ITEM_USE_REQUEST`, `ITEM_SELECT_REQUEST`, `JOURNAL_TOGGLE_REQUEST`, `UV_TOGGLE_REQUEST`, `VEHICLE_BOARD_REQUEST`, `VEHICLE_EXIT_REQUEST`, `INTERACT_REQUEST` | any state change at all — it reads input and publishes, nothing else |
 
-`AnomalyField` (Doc 2 §6.1) is the one partial exception, and the boundary is precise: its **per-tick force integration into `external_force` is physics, not gameplay state**, and stays in `_physics_process` as written. Only its `Weirdness.pulse()` / `release()` calls move to the resolver, because those are committed presentation state.
+**One node publishes every intent.** Nine of §4.2's priority rows would otherwise have no named source anywhere in any document. `PlayerInput` is a single `_unhandled_input` with a single `match` over actions; it never inspects player state, because deciding whether an intent is legal is the resolver's job and duplicating that test is how the two drift apart.
+
+**Unpausing is the one input that does not go through this path.** With `PROCESS_MODE_PAUSABLE` on every gameplay node (§10), `PlayerInput._unhandled_input` is suspended while the tree is paused — so it cannot publish the un-pause, and the resolver is not running to receive it. Pausing is a `PAUSE_REQUEST`; **unpausing is the pause menu's own affordance**, handled by the menu directly, because the menu is `PROCESS_MODE_WHEN_PAUSED`.
+
+`AnomalyField` (Doc 2 §6.1) is the one partial exception, and the boundary is precise: its **per-tick force integration into `external_force` is physics, not gameplay state**, and stays in `_physics_process` as written.
+
+**`Weirdness` needs no resolver route.** `pulse()` and `release()` may be called directly from anywhere — an anomaly, a proximity trigger, a boss phase, a chapter beat. It is presentation state: it clamps, it tweens, it reconciles floor against event, and nothing it holds can corrupt a save or desync gameplay. Routing it through the resolver would buy a rule and cost a round trip, and the rule would immediately leak anyway (Doc 2's UV beam and Doc 6's Act 2 pulses all call it directly). `set_zone_floor()` remains `activate_zone()`'s alone, because that one is part of the zone commit.
 
 `RuntimeDirector` commits the resulting effect and then emits `checkpoint_committed`, `secret_revealed`, `damage_committed`, `zone_entered`, `chapter_advanced`. UI and audio subscribe to those committed signals only.
 
@@ -668,7 +706,7 @@ The 96 px activation depth prevents music and palette flicker if Dipper touches 
 Doc 3 §3.2's `set_current()` is renamed and is now the only writer of current-zone state. Nothing else changes about its body.
 
 ```gdscript
-# res://world/zone_manager.gd (supersedes Doc 3 §3.2 set_current)
+# res://autoload/zone_manager.gd (supersedes Doc 3 §3.2 set_current)
 func activate_zone(id: StringName) -> void:
 	if id == current_zone:
 		return
@@ -725,7 +763,7 @@ Some transitions are not just a change of place. A chapter transitioning out of 
 A chapter therefore **declares** the teardown as data on the request. It does not perform it.
 
 ```gdscript
-# res://runtime/transition_teardown.gd
+# res://core/transition_teardown.gd
 class_name TransitionTeardown
 extends Resource
 
@@ -734,7 +772,7 @@ extends Resource
 @export var restore_health: bool = false     ## Health → max_pips
 @export var release_weirdness: bool = false  ## event level → 0; zone floor takes over
 @export var clear_pending_blackout: bool = false
-@export var set_checkpoint: Dictionary = {}  ## same shape as GameState.checkpoint
+@export var set_checkpoint: Dictionary = {}  ## same shape as GameState.data.checkpoint
 ```
 
 ```gdscript
@@ -882,13 +920,18 @@ Writes are **deferred to the end of the tick and executed off the physics frame*
 
 Doc 3 §9 calls `int_attic` the "primary save point." Under autosave that reading holds without a save UI: the attic checkpoint is where players will naturally end a session, and Doc 5 §4.1's `bgm_attic` is already specced as the safety cue.
 
-**Web export:** `user://` persists through IndexedDB, which requires an explicit flush. Call it once per write, after `FileAccess.close()`, and never mid-frame.
+**Writes are atomic.** Autosave-only means the save file *is* the player's progress — there is no manual backup to fall back on, so a crash or a quit mid-write must not be able to leave a half-written slot 0. Write to `user://slot0.tmp`, `close()` it, then rename over `user://slot0.sav`. Rename is the atomic step; a torn write can then only ever destroy the temp file.
+
+**(web)** `user://` persists through IndexedDB. Godot syncs IDBFS internally once the file handle closes — there is no GDScript-callable flush to invoke, so do not go looking for one. What you *can* do is detect unavailability: check `OS.is_userfs_persistent()` at boot and, if it is false (private browsing, storage pressure), surface a one-time warning that progress will not persist. Silent loss with no manual save is the worst possible failure here.
 
 ### 9.2 Save schema
 
+The save is **one value type**, not a bag of fields on the autoload. `GameState` holds a `SaveData` and swaps it; `new_game()` and `load_slot()` replace it wholesale. That is what makes `serialize`/`deserialize` pure, testable functions and gives §9.2's round-trip check something to actually call.
+
 ```gdscript
-# res://systems/game_state.gd — Autoload "GameState"
-const SAVE_VERSION := 1
+# res://core/save_data.gd
+class_name SaveData
+extends Resource
 
 var chapter: int = 1
 var flags: Dictionary = {}              # StringName -> bool | int | float | String
@@ -899,13 +942,37 @@ var secrets_found: Array[StringName] = []
 var sigils_found: Array[StringName] = []      # Doc 3 §6.2, ten of them
 var ciphers_solved: Array[StringName] = []
 var checkpoint := {
-	&"id": &"", &"zone_id": &"", &"position": Vector2.ZERO, &"wake_line_id": &"",
+	&"id": &"", &"zone_id": &"", &"spawn_marker": &"", &"wake_line_id": &"",
+	&"position": Vector2.ZERO,            ## fallback only — see below
 	&"encounter": {},                     ## §11.3; empty for ordinary checkpoints
 }
 var playtime: float = 0.0
 ```
 
-`Settings` (Doc 4 §5.1, §7.3) is **not** in the save. It lives in `user://settings.cfg` and survives New Game — accessibility settings are a property of the person, not the playthrough.
+```gdscript
+# res://autoload/game_state.gd — Autoload "GameState"
+const SAVE_VERSION := 1
+const SLOT_0 := "user://slot0.sav"
+
+var data: SaveData = SaveData.new()      ## the ONE accessor. Never a second shape.
+
+func new_game() -> void:  data = SaveData.new()
+func has_save() -> bool:  return FileAccess.file_exists(SLOT_0)
+```
+
+**`spawn_marker` is authoritative; `position` is a fallback.** Doc 3 §1.1 forbids hardcoding world coordinates — a zone edit that moves a marker would otherwise silently invalidate every checkpoint written before it, resuming the player inside geometry or off the tilemap. Transitions already carry a `spawn_marker: StringName` and no coordinate; checkpoints now match. `mount_initial(zone_id, marker, fallback_pos)` resolves the marker after the destination instantiates and only falls back to the raw `Vector2` when the marker is empty — which is the mid-zone case, a checkpoint the player triggered by walking rather than one an author placed.
+
+**Serialization format: JSON, normalized at exactly one boundary.** No other format survives this schema. `store_var` preserves types but is fragile across engine upgrades, which is precisely what §9.2's migration story has to outlive. JSON is stable but lossy in two specific ways, so `deserialize` — and nothing else, anywhere — fixes both:
+
+1. **Every dictionary key is a `String` on disk** and is converted back with `StringName(k)` on load. Godot's `String`/`StringName` dictionary-key equivalence has shifted across 4.x point releases; a twenty-chapter save format must not depend on it.
+2. **`Vector2` stores as `[x, y]`** and is rebuilt on load. JSON has no vector type.
+
+```gdscript
+static func serialize(d: SaveData) -> String
+static func deserialize(text: String) -> SaveData   ## the ONLY place keys are normalized
+```
+
+`Settings` (Doc 4 §5.1, §7.3) is **not** in the save. It lives in `user://settings.cfg` and survives New Game — accessibility settings are a property of the person, not the playthrough. It also never gates a gameplay verb (§3.1 step 3).
 
 ### 9.2.1 `journal_overrides` — the Journal is writable
 
@@ -929,15 +996,15 @@ Rules:
 3. Reads go through `JournalDB`, never through the resource directly:
 
 ```gdscript
-# res://journal/journal_db.gd
+# res://core/journal_db.gd
 static func weakness_written(id: StringName) -> String:
-	return GameState.journal_overrides.get(id, {}).get(&"weakness_written", "")
+	return GameState.data.journal_overrides.get(id, {}).get(&"weakness_written", "")
 
 static func is_verified(id: StringName) -> bool:
 	var e := entry(id)
 	if not e.weakness.is_empty():
 		return true                        # Ford's own entries are trusted
-	return GameState.journal_overrides.get(id, {}).get(&"weakness_verified", false)
+	return GameState.data.journal_overrides.get(id, {}).get(&"weakness_verified", false)
 
 static func damage_multiplier(id: StringName) -> float:
 	return 1.45 if is_verified(id) else 1.0
@@ -945,7 +1012,7 @@ static func damage_multiplier(id: StringName) -> float:
 ## The only writer. Called by RuntimeDirector at priority 12 (§8.3), never by UI.
 static func submit_weakness(id: StringName, text: String) -> bool:
 	var ok := entry(id).verifies(text)
-	var o: Dictionary = GameState.journal_overrides.get_or_add(id, {})
+	var o: Dictionary = GameState.data.journal_overrides.get_or_add(id, {})
 	o[&"weakness_written"] = text
 	o[&"weakness_verified"] = ok
 	GameState.mark_dirty()                 # §9.1 deferred autosave
@@ -987,7 +1054,7 @@ Rules:
 1. `chapter` is **monotonic**. A request whose `to` is not `from + 1` is rejected with `push_error`. Chapter Select uses §9.5, not this event.
 2. Committing at priority 15 means `current_zone`, damage, and every other commit for that tick have already landed. The advance never changes a gate another resolver step read this tick.
 3. On commit, `ZoneManager` re-evaluates residency: newly unlocked zones become streamable, and `is_seam_open()` (Doc 3 §3.2) may now return true for boundaries the player is standing near. Seams open **live**, without a transition — the boundary's `SeamLink` state activates on the next tick and the player can simply walk through.
-4. `chapter_advanced` is emitted after the write. Doc 3 §5.1's portal weirdness ramp and Doc 5 §5.4's portal hum stages subscribe to it; neither polls `GameState.chapter` per frame.
+4. `chapter_advanced` is emitted after the write. Doc 3 §5.1's portal weirdness ramp and Doc 5 §5.4's portal hum stages subscribe to it; neither polls `GameState.data.chapter` per frame.
 5. An autosave follows immediately (§9.1).
 
 ### 9.5 Chapter Select uses a scratch save
@@ -1045,7 +1112,7 @@ At zero pips, Doc 2 §7.3's presentation runs as written: desaturate over 0.6 s,
 
 ```text
 1. BLACKOUT tick count reaches zero. RESPAWN_REQUEST queued.
-2. Resolver, _resolve_locked(). Read GameState.checkpoint (in memory, §9.3).
+2. Resolver, _resolve_locked(). Read GameState.data.checkpoint (in memory, §9.3).
 3. If checkpoint.zone_id != current_zone:
       run §7.4's gated sequence to that zone, overlay already opaque —
       no fade-out is played, we are already black.
@@ -1071,7 +1138,7 @@ Step 3 is why respawn sits at priority 1 rather than being a special case: a cro
 
 Step 5's blanket `CombatDirector.reset()` is right for ordinary death — you wake up safe — and wrong for dying inside a boss fight, where it would drop the player back at a checkpoint with the boss gone and the fight unwinnable.
 
-`GameState.checkpoint` therefore carries an optional `encounter` block:
+`GameState.data.checkpoint` therefore carries an optional `encounter` block:
 
 ```gdscript
 checkpoint = {
@@ -1130,7 +1197,7 @@ Chapters that have no boss never touch any of this. `encounter` defaults to `{}`
 The resolver is a pure function of (queue, state). §12's harness exploits that: it drives `RuntimeDirector._resolve()` directly with hand-enqueued events and stub systems, so no physics server, no rendering, and no real scenes are needed. Run headless.
 
 ```gdscript
-# res://runtime/test_runtime.gd — godot --headless --script res://runtime/test_runtime.gd
+# res://tests/test_all.gd — godot --headless --script res://tests/test_all.gd
 extends SceneTree
 
 func _init() -> void:
@@ -1192,8 +1259,18 @@ Automated Godot headless tests must prove:
 28. `ENCOUNTER_STATE_REQUEST` commits only through the resolver at priority 14; an arm naming an unregistered `setup` is rejected rather than written.
 29. A `JOURNAL_SUBMIT_REQUEST` in the same tick as damage does **not** write to the save; the text survives in the field and a resubmit after the fumble commits normally (§8.3).
 30. No UI script calls `JournalDB.submit_weakness()` or a cipher validator directly — a static scan over `res://ui/`, so a future pane cannot quietly bypass the resolver.
+31. **Every `State` value has an arm in `PlayerController._physics_process`.** For each state, one tick with a nonzero starting velocity leaves displacement within that arm's declared expectation — `BLACKOUT` and `ZONE_TRANSITION` at exactly zero. The regression test for a state that silently coasts because the `match` was never extended.
+32. `deserialize(serialize(d))` reproduces `d` field for field, **including `StringName` dictionary keys and `Vector2` values** — the two things JSON loses. Assert key *types*, not just presence.
+33. A save write is atomic: killing the process between the temp write and the rename leaves the previous slot 0 intact and loadable.
+34. Every registered `ZoneDef` carries a non-empty `bgm_id` that exists in `AudioDirector`'s library, and every zone in the Chapter 1 path resolves — the check that catches an interior authored without music before it crashes on entry.
+35. Exactly one node in the tree carries the weirdness shader material, and `Weirdness.bind()` was called on it during `begin_session()`.
+36. `Weirdness.applied` — not `target_level` — is what `level_changed` carries, and a `pulse()` mid-tween leaves exactly one writer of any stem's `volume_db` in a frame.
+37. `is_seam_open()` reproduces Doc 3 §1.3's adjacency table row for row, read off each `SeamLink` — the check that catches an edge whose open-chapter was inferred from its endpoints rather than authored.
+38. A `Scanner` resolves both a stub `PropScannable` and a stub scannable NPC through `get_overlapping_areas()`, and returns `null` for a `PhysicsBody2D` carrying no `scannable` child.
+39. `_cull_distant()` never frees an interior, and no two interiors share a `world_rect()`.
+40. Every gameplay action named in Doc 2 §3.5 resolves to at least one `InputMap` event at boot, **including `journal`, `uv_light`, and `scan` before they are earned** — verbs are gated at the resolver, never by leaving an action unbound.
 
-Checks 1–3, 6, and 14 need a real scene tree; run them from a small `test_runtime.tscn` driven by `Engine.get_physics_frames()`. The rest run from the pure harness above.
+Checks 1–3, 6, 14, 34, 35, and 39 need a real scene tree; run them from a small `res://tests/scene_harness.tscn` driven by `Engine.get_physics_frames()`. The rest run from the pure harness above. Both are entered from the one suite, `res://tests/test_all.gd`.
 
 ---
 
@@ -1205,7 +1282,7 @@ Every chapter doc is authored against this surface and nothing below it.
 |---|---|---|
 | Story beat fires | `CUTSCENE_REQUEST` via §8.2 | Call dialogue from a zone `Area2D` |
 | Player lockout for a line | A cutscene (§8.4) | `DialogueLine.pause_player` — removed |
-| Chapter ends | `CHAPTER_ADVANCE_REQUEST`, `to = from + 1` | Write `GameState.chapter` |
+| Chapter ends | `CHAPTER_ADVANCE_REQUEST`, `to = from + 1` | Write `GameState.data.chapter` |
 | Persist a beat | `on_complete_flag`, `ch<NN>_` prefix (§9.2) | Write another chapter's flags |
 | Boss phase change | `CombatDirector.boss_phase` (§2.3) | Touch Doc 5's stem gains |
 | Mid-fight line | `Mode.BUBBLE` (Doc 4 §3.2, §11.1) | `Mode.BOX` during combat |
@@ -1234,7 +1311,7 @@ Every chapter doc is authored against this surface and nothing below it.
 10. No gameplay duration uses a `SceneTree` timer. Durations are tick counts derived from the owning document's constant.
 11. `RuntimeDirector.process_physics_priority = 100`. The frame contract is void without it.
 12. Saving is automatic and slot 0 is the only real save. Chapter replay uses a scratch slot and discards its progress.
-13. `GameState.chapter` is monotonic and advances only by `CHAPTER_ADVANCE_REQUEST` from a chapter doc.
+13. `GameState.data.chapter` is monotonic and advances only by `CHAPTER_ADVANCE_REQUEST` from a chapter doc.
 14. Flags are namespaced `ch<NN>_` / `zone_` / `sys_` / `npc_`. A chapter writes only its own prefix and the shared ones.
 15. `Settings` is never part of a save.
 16. Respawn reads in-memory state, never disk. Failure costs time, never progress.
@@ -1248,5 +1325,14 @@ Every chapter doc is authored against this surface and nothing below it.
 24. Transition-time state changes are declared as a `TransitionTeardown` resource and committed by `RuntimeDirector`. Chapters never mutate combat, player, health, Weirdness, or checkpoint state during a transition.
 25. Neither `TransitionTeardown` nor an `encounter` block may carry a `Callable`. Both are plain data, and the resolver performs every commit.
 26. A checkpoint taken inside a boss fight carries an `encounter` block and resumes the fight at its phase. Ordinary checkpoints reset combat as before. Chapters arm and clear it with `ENCOUNTER_STATE_REQUEST`; they never write `checkpoint.encounter`.
-27. `JournalEntry` resources are immutable authored data. Every mutable per-entry fact lives in `GameState.journal_overrides` and is read through `JournalDB`.
+27. `JournalEntry` resources are immutable authored data. Every mutable per-entry fact lives in `GameState.data.journal_overrides` and is read through `JournalDB`.
 28. Player-typed text — weakness fields and cipher answers alike — is submitted as `JOURNAL_SUBMIT_REQUEST` and committed by the resolver at priority 12. UI panes collect text and react to `journal_submit_committed`; they never validate or write.
+29. **`GameState` holds only persisted fields, in one `SaveData` reached as `GameState.data`.** Live health, stamina, Journal state, and item state belong to the player node and are reached through `RuntimeDirector.player`. A system reaching for the nearest global instead of the owner is a bug, not a shortcut.
+30. **`Journal`, `Health`, and `Stamina` are nodes on the player, never autoloads.** Journal timings live in the static `JournalConst` so they are readable at parse time; Journal state lives on the node.
+31. **`Weirdness.applied` is the value every system reads.** `target_level` is where the tween is headed and nothing renders or mixes against it. `pulse()`/`release()` may be called directly from anywhere — `Weirdness` is presentation state with no resolver requirement. `set_zone_floor()` belongs to `activate_zone()` alone.
+32. **The save format is JSON, normalized in `deserialize` and nowhere else**: keys are `String` on disk and rebuilt as `StringName`; `Vector2` stores as `[x, y]`. Writes go to a temp file and are renamed into place.
+33. **Checkpoints name a `spawn_marker`; `position` is a fallback** for mid-zone checkpoints only. No authored checkpoint or teardown carries a raw world coordinate.
+34. **Verbs are gated at the resolver, never by binding or unbinding `InputMap` actions.** Every action is bound at boot; an unearned verb is refused at priority 11/12 by an inventory check.
+35. **`RuntimeDirector` sees a hitbox on the tick after it arms.** `get_overlapping_areas()` reflects the last completed physics step; no `process_physics_priority` changes that. One tick, uniform, accepted.
+36. **One `PlayerInput` node publishes every player intent.** Unpausing is the pause menu's own affordance and does not route through the resolver, which is not running while paused.
+37. **The web export is best-effort; macOS native is the target.** Seamless streaming assumes worker threads and degrades to gated travel without them (Doc 3 §3.3).

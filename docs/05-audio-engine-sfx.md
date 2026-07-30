@@ -10,7 +10,7 @@
 | Decision | Value |
 |---|---|
 | BGM model | Vertical stems within a zone, crossfade between zones |
-| Stem driver | `Weirdness.level` — the same float driving Doc 1's shader |
+| Stem driver | `Weirdness.applied` — the same float, on the same curve, driving Doc 1's shader |
 | Placeholder | Procedural, **baked to PCM at startup** (§7) |
 | Dialogue | Per-character pitched blips |
 | Score scope | 16 pieces + 5 boss themes |
@@ -48,7 +48,7 @@ The audio equivalent of Doc 1's palette ramp. One float, three parameters:
 | `Master` | Pitch scale | 1.0 | 0.985 (barely flat — felt, not heard) |
 
 ```gdscript
-# res://audio/audio_director.gd — Autoload "AudioDirector" (excerpt)
+# res://autoload/audio_director.gd — Autoload "AudioDirector" (excerpt)
 func _on_weirdness_changed(w: float) -> void:
 	var lp: AudioEffectLowPassFilter = AudioServer.get_bus_effect(_bus_bgm, 0)
 	lp.cutoff_hz = lerpf(20000.0, 3400.0, ease(w, 2.2))
@@ -81,7 +81,7 @@ Every non-boss piece is authored as four synchronized stems, same length, same t
 ### 2.2 Gain curves
 
 ```gdscript
-# res://audio/stem_rack.gd
+# res://core/stem_rack.gd
 class_name StemRack
 extends Node
 
@@ -121,7 +121,7 @@ static func to_db(linear: float) -> float:
 **All four stems play continuously from the moment the rack starts. Only gain changes — never `play()` or `stop()`.** Starting a stem late puts it out of phase with the others, and the resulting flam is instantly audible. This is the single most common way vertical layering gets broken.
 
 ```gdscript
-# res://audio/stem_rack.gd (continued)
+# res://core/stem_rack.gd (continued)
 var _players: Dictionary = {}          # Stem -> AudioStreamPlayer
 var _rack_gain := 1.0                  # crossfade multiplier, set by AudioDirector
 
@@ -137,15 +137,22 @@ func load_piece(piece: BgmPiece) -> void:
 	for p in _players.values():
 		p.play()
 
+## The ONLY writer of volume_db. Driven by Weirdness.level_changed and by nothing
+## else, so there is exactly one path to a stem's gain.
 func apply_weirdness(w: float) -> void:
 	for stem in _players:
 		var g: float = stem_gain(stem, w) * _rack_gain
 		_players[stem].volume_db = to_db(g)
 
+## Stores the rack gain and returns. It must NOT re-apply here: during a crossfade
+## this is being tweened every frame while Weirdness.level_changed is also firing,
+## and two callers writing volume_db in one frame means last-writer-wins,
+## nondeterministically. The next level_changed picks the new _rack_gain up.
 func set_rack_gain(g: float) -> void:
 	_rack_gain = g
-	apply_weirdness(Weirdness.level)
 ```
+
+**Read `Weirdness.applied`, never `Weirdness.target_level`.** `applied` is where the tween *is*; `target_level` is where it is *headed* and snaps the instant a pulse is requested. Mixing against the snapped value while the shader follows the eased one is how "one float runs the supernatural" quietly becomes two floats on two curves — audible as audio arriving ahead of the colour grade at exactly the authored beats where the coupling is supposed to sell itself.
 
 ---
 
@@ -154,11 +161,17 @@ func set_rack_gain(g: float) -> void:
 Two racks, A and B. Doc 3's `ZoneManager.activate_zone()` (Doc 00 §7.2) already calls `AudioDirector.set_zone(def.bgm_id)` — and it is the only thing that does, for interiors as well as exteriors.
 
 ```gdscript
-# res://audio/audio_director.gd (excerpt)
+# res://autoload/audio_director.gd (excerpt)
 const ZONE_CROSSFADE := 2.5
 
 func set_zone(bgm_id: StringName) -> void:
 	if bgm_id == _current_bgm_id:
+		return
+	# Fail loud, not into a null deref. An unregistered or empty bgm_id would
+	# otherwise index a missing key and the next piece.stems[stem] would crash —
+	# taking the build down on entering whichever zone was authored without one.
+	if not _library.has(bgm_id):
+		push_error("no BGM piece registered for zone id '%s'" % bgm_id)
 		return
 	_current_bgm_id = bgm_id
 
@@ -168,15 +181,26 @@ func set_zone(bgm_id: StringName) -> void:
 
 	var outgoing := _active_rack
 
+	# Start the incoming rack ON A BAR LINE, not immediately. Shared tempo and key
+	# (§4.3) only blend if the two pieces are also phase-aligned — starting the
+	# incoming rack at sample 0 against an arbitrary outgoing bar position gives
+	# 2.5 s of two drum patterns a fraction of a beat apart, which is audibly
+	# worse than crossfading pieces at different tempos. The outgoing tail covers
+	# the delay, and this is what makes §4.3's constraint earn its cost.
+	var delay: float = outgoing.seconds_to_next_bar() if outgoing.is_playing() else 0.0
+
 	var t := create_tween().set_parallel().set_trans(Tween.TRANS_SINE)
-	t.tween_method(incoming.set_rack_gain, 0.0, 1.0, ZONE_CROSSFADE)
-	t.tween_method(outgoing.set_rack_gain, 1.0, 0.0, ZONE_CROSSFADE)
+	t.tween_callback(incoming.play).set_delay(delay)
+	t.tween_method(incoming.set_rack_gain, 0.0, 1.0, ZONE_CROSSFADE).set_delay(delay)
+	t.tween_method(outgoing.set_rack_gain, 1.0, 0.0, ZONE_CROSSFADE).set_delay(delay)
 	t.chain().tween_callback(outgoing.unload)
 
 	_active_rack = incoming
 ```
 
-Crossfading eight stems at once (four out, four in) is why §4.3's shared-tempo rule exists.
+Crossfading eight stems at once (four out, four in) is why §4.3's shared-tempo rule exists — and the bar-line delay above is what lets that rule actually do its job.
+
+**Every registered `ZoneDef` must carry a non-empty `bgm_id` that exists in `_library`.** Doc 00 §12 asserts it as a static check over the zone registry, because the failure mode is a hard crash on first entry to whichever zone was missed rather than a quiet fallback to silence.
 
 ### 3.1 Streaming and audio
 
@@ -285,7 +309,7 @@ Four simultaneous layers, gain and pitch driven by speed (Doc 3 §7).
 | `cart_electric` | Loop. Constant faint motor whine (it's a golf cart, not a car) |
 
 ```gdscript
-# res://audio/cart_audio.gd
+# res://actors/vehicle/cart_audio.gd
 func _physics_process(_d: float) -> void:
 	var ratio: float = absf(cart.speed) / GolfCart.ROAD_SPEED
 
@@ -307,7 +331,7 @@ Players discover this on their own and it changes how they move through the wood
 
 | Cue | Behaviour |
 |---|---|
-| `whisper_bed` | Loop, positional. Gain = `weirdness × (1 - speed_ratio) × proximity` |
+| `whisper_bed` | Loop, positional. Gain = `Weirdness.applied × (1 - speed_ratio) × proximity` |
 | `whisper_oneshot_01..08` | Random every 8–24 s when `weirdness > 0.3`. Hard-panned L or R at random |
 | `whisper_name` | **Rare (2% per one-shot roll): says "Dipper."** Only above `weirdness > 0.6`. Never explained, never referenced |
 | `whisper_swell` | On entering an anomaly field |
@@ -387,7 +411,7 @@ Doc 4 §4.5 fires a blip every 3rd glyph, skipping whitespace and punctuation.
 Two cheap touches that do a lot:
 
 ```gdscript
-# res://audio/dialogue_blips.gd
+# res://ui/dialogue/dialogue_blips.gd
 func blip(speaker: StringName, glyph_index: int, total: int, ends_with: String) -> void:
 	var v: Dictionary = VOICES[speaker]
 	var p: float = v.pitch + randf_range(-v.variance, v.variance)
@@ -413,16 +437,20 @@ func blip(speaker: StringName, glyph_index: int, total: int, ends_with: String) 
 
 Real audio arrives late; audio *bugs* arrive early. Shipping silence means the mixing, crossfade, ducking, and layering systems stay untested until a composer delivers — which is exactly backwards.
 
-### 7.1 Bake, don't stream
+### 7.1 Bake offline, don't stream — and don't bake at startup either
 
-Generating audio in real time via `AudioStreamGenerator` risks buffer underruns on the web export. Instead, **synthesize once at startup into an `AudioStreamWAV`**, then play it through the ordinary `AudioStreamPlayer` path. The placeholder is then indistinguishable from a real asset as far as every other system is concerned — same buses, same crossfades, same loops, same code path that ships.
+Generating audio in real time via `AudioStreamGenerator` risks buffer underruns. **Synthesize into an `AudioStreamWAV`** and play it through the ordinary `AudioStreamPlayer` path — the placeholder is then indistinguishable from a real asset to every other system: same buses, same crossfades, same loops, same code path that ships.
+
+**Run the synthesizer once, offline, as an editor tool — never at boot.** An earlier draft baked every placeholder during startup and budgeted it at "under a second." That number was wrong by orders of magnitude: 16 pieces × 4 stems plus 23 boss stems is 87 stems, each `22050 × 2.5 × 8` = 441,000 samples, so ~38 M iterations of an interpreted GDScript loop doing `fposmod`, an oscillator, an envelope, a clamp and `encode_s16` — plus ~120 SFX bakes. That is tens of seconds of frozen window on native, and worse in WASM where there is no worker thread to move it to. The resident cost is as bad as the time: 87 × 441,000 × 2 bytes ≈ **77 MB of PCM**, on top of Doc 3 §3.4's 90 MB texture budget.
+
+So `bake_placeholders.gd` lives in `tools/`, outside `res://`, and is run by hand when a placeholder spec changes. It writes WAVs into `res://assets/audio/`, which are committed like any other asset. Boot loads files. Three things fall out of this for free: startup is instant, any single placeholder can be replaced by a real recording without touching code, and the shipped build carries no synthesizer at all.
 
 ```gdscript
-# res://audio/proc_baker.gd
+# tools/bake_placeholders.gd — run from the editor, NOT at runtime.
 class_name ProcBaker
 
 const MIX_RATE := 22050          # placeholder-grade; halves bake time and memory
-const BARS := 8
+const BARS := 2                  # a 5 s loop is enough to exercise crossfade + ducking
 const BAR_SECONDS := 2.5
 
 enum Wave { SINE, SAW, TRI, NOISE }
@@ -491,7 +519,7 @@ static func _envelope(t: float, attack: float, release: float) -> float:
 
 ### 7.2 Placeholder stem recipes
 
-Each piece's four stems get a spec; the whole score bakes in well under a second.
+Each piece's four stems get a spec. Baking the whole score is a one-off editor run, not a startup cost — see §7.1.
 
 | Stem | Wave | Root | Pattern | Reads as |
 |---|---|---|---|---|
@@ -548,7 +576,7 @@ The Journal case is the interesting one: world SFX drop while ambience *rises*. 
 ## 10. Validation
 
 ```gdscript
-# res://audio/test_audio.gd — godot --headless --script res://audio/test_audio.gd
+# res://tests/test_all.gd — godot --headless --script res://tests/test_all.gd
 extends SceneTree
 
 func _init() -> void:

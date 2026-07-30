@@ -80,7 +80,7 @@ row 7 │          │ DUSK 1×1 │          │
 ### 1.4 `ZoneDef` resource
 
 ```gdscript
-# res://world/zone_def.gd
+# res://core/zone_def.gd
 class_name ZoneDef
 extends Resource
 
@@ -98,9 +98,15 @@ extends Resource
 @export_group("Progression")
 ## Chapter at which this zone becomes reachable at all.
 @export var unlock_chapter: int = 1
-## Chapter at which its boundaries become streamed seams instead of gated fades.
-@export var seam_chapter: int = 17
-@export var neighbors: Array[StringName] = []
+## Adjacency, one entry per boundary. seam_chapter belongs HERE, on the edge —
+## it is a property of the boundary between two zones, not of either zone.
+@export var neighbors: Array[SeamLink] = []
+
+func link_to(id: StringName) -> SeamLink:
+	for l in neighbors:
+		if l.to == id:
+			return l
+	return null
 
 func world_rect() -> Rect2:
 	var cell := ZoneManager.CELL
@@ -109,6 +115,18 @@ func world_rect() -> Rect2:
 func world_origin() -> Vector2:
 	return Vector2(grid_offset) * ZoneManager.CELL
 ```
+
+```gdscript
+# res://core/seam_link.gd
+class_name SeamLink
+extends Resource
+
+@export var to: StringName
+## Chapter at which this boundary becomes a streamed seam instead of a gated fade.
+@export var seam_chapter: int = 17
+```
+
+**Interiors get distinct off-grid offsets.** `is_interior` zones sit outside the exterior grid, but they must not all share one sentinel — identical `grid_offset` means identical `world_rect()`, so every interior occupies the same rectangle and §11's overlap test (which only walks exteriors) would never notice. Assign `Vector2i(-1, -n)`, one `n` per interior, and extend §11's overlap loop to cover them.
 
 ---
 
@@ -129,7 +147,8 @@ The brief's requirement — foreground interaction isolated from atmospheric bac
 | +40 | `Overhead` | ✗ | Tree canopies, roof overhangs, bridges. Always drawn over actors |
 | +60 | `Weather` | ✗ | Rain, snow, dust motes, fireflies |
 | +80 | `LightingOverlay` | ✗ | `CanvasModulate` + `Light2D` nodes |
-| +100 | `WeirdnessGrade` | ✗ | Doc 1 §2 `ColorRect`. Own `CanvasLayer` |
+
+**`WeirdnessGrade` is deliberately not in this stack.** There is exactly one grade `ColorRect` in the whole game and it lives on `world_root` (Doc 1 §2.1, Doc 00 §3.2) — not in any zone scene. A per-zone grade would mean two or three chained full-screen `hint_screen_texture` backbuffer copies whenever neighbours are resident, while `Weirdness` drove only whichever one it happened to bind and the others sat frozen at their defaults.
 
 `YSort` is the only layer with `y_sort_enabled = true`. Doc 1 §6.1 put every character's origin at ground contact, and Doc 2 rested the body ellipse on that line — that's what makes sorting correct here. A tree's `Node2D` origin goes at its **trunk base**, not its centre, for exactly the same reason.
 
@@ -138,7 +157,7 @@ The brief's requirement — foreground interaction isolated from atmospheric bac
 Anything on `Overhead` covering walkable ground carries a fade trigger, or players get lost under a tree.
 
 ```gdscript
-# res://world/overhead_fade.gd
+# res://world/nodes/overhead_fade.gd
 class_name OverheadFade
 extends Area2D
 
@@ -199,7 +218,7 @@ Every boundary carries both, and swaps on a chapter flag:
 Both are authored on the same `ZoneBoundary` node at zone-edge midpoints, so flipping to seamless is a flag change, not a re-authoring pass.
 
 ```gdscript
-# res://world/zone_boundary.gd
+# res://world/nodes/zone_boundary.gd
 class_name ZoneBoundary
 extends Area2D
 
@@ -227,7 +246,7 @@ A locked destination is refused by the resolver, which emits the in-character "n
 ### 3.2 `ZoneManager`
 
 ```gdscript
-# res://world/zone_manager.gd — Autoload "ZoneManager"
+# res://autoload/zone_manager.gd — Autoload "ZoneManager"
 extends Node
 
 const CELL := Vector2(1920, 1080)
@@ -299,9 +318,14 @@ func _instantiate(id: StringName, packed: PackedScene) -> void:
 
 func _cull_distant() -> void:
 	for id in _live.keys():
-		if id == current_zone:
-			continue
 		var def: ZoneDef = _defs[id]
+		# Interiors are off-grid and are freed explicitly on exit (Doc 00 §7.6) —
+		# they are never cull candidates. Without this check, a distance test
+		# against an off-grid sentinel rect can free the interior the player just
+		# spawned into, behind an opaque overlay, presenting as a black screen
+		# with no error. Chapter 1 runs three interiors back to back.
+		if id == current_zone or def.is_interior:
+			continue
 		if _distance_to_rect(_player.global_position, def.world_rect()) > UNLOAD_MARGIN:
 			_live[id].queue_free()
 			_live.erase(id)
@@ -309,15 +333,22 @@ func _cull_distant() -> void:
 # --- queries --------------------------------------------------------------
 
 func is_unlocked(id: StringName) -> bool:
-	return GameState.chapter >= (_defs[id] as ZoneDef).unlock_chapter
+	return GameState.data.chapter >= (_defs[id] as ZoneDef).unlock_chapter
 
+## The chapter a seam opens is a property of the EDGE, so it is read off the link
+## and never reconstructed from the two zones. maxi(a.seam_chapter, b.seam_chapter)
+## happens to reproduce §1.3's table today only because the adjacency graph is a
+## tree with monotonically increasing unlock chapters along every path — that is
+## coincidence, not construction. One edge closing a cycle (a Ch 6 cliff shortcut
+## between two zones that unlock at Ch 3 and Ch 5, say) becomes unrepresentable
+## and opens two chapters early, silently.
 func is_seam_open(from_id: StringName, to_id: StringName) -> bool:
 	if not _defs.has(from_id) or not _defs.has(to_id):
 		return false
-	var a: ZoneDef = _defs[from_id]
-	var b: ZoneDef = _defs[to_id]
-	return GameState.chapter >= maxi(a.seam_chapter, b.seam_chapter) \
-		and is_unlocked(to_id)
+	var link := (_defs[from_id] as ZoneDef).link_to(to_id)
+	if link == null:
+		return false
+	return GameState.data.chapter >= link.seam_chapter and is_unlocked(to_id)
 
 ## Renamed to activate_zone() by Doc 00 §7.2, which makes this the single commit
 ## path for current zone, palette floor, and BGM — exteriors and interiors alike.
@@ -344,11 +375,22 @@ The failure case: the player sprints at a boundary and arrives before the backgr
 1. **Soft block.** Each `SeamLink` owns a thin `StaticBody2D` on `world_static`, disabled by default. If the player is inside `STREAM_MARGIN` and the neighbour is still `_loading`, it enables — Dipper bumps a half-second and the load lands. Almost always invisible.
 2. **Grace wipe.** If the player is still pressed against the block after `SEAM_BLOCK_GRACE` (0.25 s), fall through to a `GateTransition` with a fast wipe. Ugly-ish, extremely rare, and always better than a stall.
 
-`STREAM_MARGIN = 720` gives 3.4 s of warning at walk speed, 2.1 s at run — comfortably more than a zone load takes on any target machine. Retune it only if stage 2 ever actually fires.
+`STREAM_MARGIN = 720` gives 3.4 s of warning at walk speed, 2.1 s at run — comfortably more than a zone load takes on macOS. Retune it only if stage 2 ever actually fires.
+
+**(web) Seamless streaming requires a real background thread, and HTML5 may not have one.** `ResourceLoader.load_threaded_request` only runs off-thread when the build has Thread Support enabled, which needs `SharedArrayBuffer`, which needs the host to send COOP/COEP headers (on itch.io, the "SharedArrayBuffer support" project flag). Without them Godot loads **synchronously on the main thread** and `_poll_loads()` reports `THREAD_LOAD_LOADED` on the next frame — having stalled that frame for the entire load.
+
+This matters because it invalidates the premise, not the tuning: `STREAM_MARGIN`, `SeamBlocker`, `SEAM_BLOCK_GRACE` and the fallback wipe all exist to hide a load behind player movement, and with no worker thread there is nothing to hide. Raising the margin does not help — it only moves *when* the stall happens. macOS native is the primary target (Doc 1 §0) and has threads, so this is a web caveat rather than a design constraint. Assert it at boot so the degraded case is loud rather than mysterious:
+
+```gdscript
+if OS.get_name() == "Web" and not OS.has_feature("threads"):
+	push_warning("no worker threads: seam crossings will hitch — gate Act I travel instead")
+```
+
+The documented fallback, if the flag is unavailable: **all Act I travel becomes gated**. Every boundary already authors a `GateTransition` alongside its `SeamLink` (§10.4), so this is a per-boundary flag flip, not a rewrite.
 
 ### 3.4 Budget
 
-Worst case is a corner where three zones meet: current + two neighbours resident. At ~28 MB of texture per exterior zone, peak is roughly **90 MB** regardless of world size. That is the number that keeps the web export viable, and it does not grow as chapters are added.
+Worst case is a corner where three zones meet: current + two neighbours resident. At ~28 MB of texture per **4-screen** exterior zone, peak is roughly **90 MB**. Note the two 6-screen zones (`z_woods_north`, `z_town`) scale that figure: a corner involving both is closer to 14 screens than 12, so budget ~120 MB where they meet. The number does not grow as chapters are added, which is the property that matters.
 
 ---
 
@@ -469,7 +511,7 @@ The brief's requirement: ciphers and secrets baked into level geometry rather th
 | `ZODIAC_SIGIL` | Varies per sigil | **Collectible — see §6.2** |
 
 ```gdscript
-# res://world/secret_trigger.gd
+# res://world/nodes/secret_trigger.gd
 class_name SecretTrigger
 extends Area2D
 
@@ -553,7 +595,7 @@ Unlocks Chapter 9. Roads only — a `is_road` custom-data flag on tiles.
 | Passengers | Driver + 1 companion (auto-boards) |
 
 ```gdscript
-# res://vehicles/golf_cart.gd  (excerpt)
+# res://actors/vehicle/golf_cart.gd  (excerpt)
 func _physics_process(delta: float) -> void:
 	var throttle := Input.get_axis("move_down", "move_up")
 	var steer := Input.get_axis("move_left", "move_right")
@@ -625,7 +667,7 @@ Every exterior zone scene must have, in order:
 4. `ZoneBoundary` areas at every edge listed in §1.3, `edge_normal` pointing outward.
 5. Spawn `Marker2D`s matching every inbound boundary's `spawn_marker`.
 6. Checkpoints per §9.
-7. `PaletteRegion` with the zone's `.tres`.
+7. `PaletteRegion` with the zone's `.tres`. **It writes only into its own zone's subtree** — never a screen-wide tint, never the grade. Any screen-wide colour state is committed by `ZoneManager.activate_zone()` alongside the weirdness floor. `PaletteRegion` applies on `_ready()`, which fires for a *streamed neighbour* up to `STREAM_MARGIN` (720 px) before the player reaches the seam; anything screen-wide there would flip the grade early and read as an activation-volume bug.
 8. `SecretTrigger`s at the §6 coordinates.
 9. `OverheadFade` on every canopy covering walkable ground.
 10. A `ZoneActivationVolume` 96 px inside every seamless inbound edge — **one per inbound direction, not one per boundary**. Doc 00 §7.1. This is the only node permitted to request `activate_zone()`.
@@ -638,7 +680,7 @@ Every exterior zone scene must have, in order:
 The hand-laid grid in §1.2 is the highest-risk artefact in this document — an overlap or a false adjacency produces zones that visibly intersect or seams that never open, and neither fails loudly.
 
 ```gdscript
-# res://world/test_world.gd — godot --headless --script res://world/test_world.gd
+# res://tests/test_all.gd — godot --headless --script res://tests/test_all.gd
 extends SceneTree
 
 const CELL := Vector2(1920, 1080)
@@ -710,13 +752,20 @@ func _init() -> void:
 		"Shack->Town walk is %.1fs, outside the compact-scale target" % seconds)
 
 	# --- streaming budget: at most 3 zones within margin of any point ------
+	# Sample CORNERS, not centres. From a zone's centre the nearest other zone is
+	# a full cell away, so a centre-sampled test always yields near == 1 against a
+	# budget of 3 and can never fail. The real risk is a corner where three zones
+	# meet — which is exactly the case the budget exists to bound.
 	for id in ids:
-		var c := _rect(zones[id]).get_center()
-		var near := 0
-		for other in ids:
-			if _dist_to_rect(c, _rect(zones[other])) <= 720.0:
-				near += 1
-		assert(near <= 3, "%s has %d zones within stream margin (budget 3)" % [id, near])
+		var r := _rect(zones[id])
+		for corner in [r.position, r.position + Vector2(r.size.x, 0.0),
+				r.position + Vector2(0.0, r.size.y), r.end]:
+			var near := 0
+			for other in ids:
+				if _dist_to_rect(corner, _rect(zones[other])) <= 720.0:
+					near += 1
+			assert(near <= 3, "%s corner %s has %d zones within stream margin (budget 3)"
+				% [id, corner, near])
 
 	print("world: all checks passed")
 	quit()
@@ -744,7 +793,7 @@ static func _dist_to_rect(p: Vector2, r: Rect2) -> float:
 1. One world coordinate space. Zone scenes author at local `(0,0)`; `ZoneManager` applies `grid_offset * CELL`.
 2. The §2.1 layer stack is mandatory. `YSort` is the only Y-sorted layer.
 3. **No zone scene contains parallax.** Sky and mid-ground live on the world root.
-4. Every boundary carries both `GateTransition` and `SeamLink`; `seam_chapter` selects.
+4. Every boundary carries both `GateTransition` and `SeamLink`; the link's own `seam_chapter` selects. §11 asserts `is_seam_open()` reproduces §1.3's adjacency table row for row — the check that catches an edge whose open-chapter was inferred rather than authored.
 5. At most 3 zones resident. Peak texture budget ~90 MB, flat as the world grows.
 6. Prop and character origins sit at ground contact — required for correct sorting.
 7. Interiors are separate scenes and never stream. `int_mansion` is the sole one-scene exception.

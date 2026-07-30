@@ -1,0 +1,211 @@
+; Doc 01 §6.1's tree, and nothing else. Every rest position, every anchor offset
+; and the shadow's points are DERIVED from the CharacterProportions resource by
+; rig_humanoid.gd — a number authored here would be a number an inheriting
+; character scene could not override with §10's one field.
+;
+; §10: this is an inherited-scene BASE. dipper.tscn (row 1.3) and the other 30+
+; character scenes inherit it, which is also why the root is a CharacterBody2D
+; rather than §6.1's Node2D — see the deviation note in rig_humanoid.gd.
+;
+; The b_hair_01 → b_hair_02 → b_hair_03 chain §6.1 marks "(Wendy/Mabel only)" is
+; deliberately ABSENT: an inherited scene adds nodes freely, and every other
+; character would otherwise carry three bones no animation ever touches.
+;
+; The two properties authored on every Bone2D are engine bookkeeping, not
+; geometry — the script still overwrites `rest` with the derived pose:
+;   * `rest` — Bone2D's constructor leaves `rest` an ALL-ZERO Transform2D as its
+;     "no rest authored yet" sentinel, and Skeleton2D inverts every bone's rest
+;     during bone setup, which happens on enter_tree, before `_ready()` can
+;     derive one. An identity rest here is what keeps that from being 18
+;     `affine_invert: det == 0` errors on every character in the game.
+;   * `auto_calculate_length_and_angle = false` on the seven terminal bones — the
+;     gizmo length is derived from a FIRST CHILD bone, and a leaf has none, so
+;     every leaf warns on every instantiation otherwise. Note the spelling: the
+;     accessors are `get_autocalculate_…`, the PROPERTY is `auto_calculate_…`,
+;     and a text scene drops a misspelled property silently.
+
+;
+; PARTS. §6.2's z_index table is authored HERE and the geometry is derived in
+; rig_humanoid.gd, for the reason Deferred R1 gives: real art lands by assigning
+; a texture to these same nodes in the Inspector, and an artist cannot select a
+; node that is conjured at runtime. Same for `color` — §9.2's placeholder fills,
+; overridable per character, and the ONLY thing besides the proportions resource
+; §10 lets an inheriting scene touch.
+;
+; `hair_back` (z 10) and `hair_front` (z 30) are deliberately ABSENT, exactly as
+; the b_hair_01→03 chain above is: §6.1 marks the hair "(Wendy/Mabel only)", and
+; an inherited scene adds nodes freely. Every other row of §6.2's table is here.
+
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://actors/rig_humanoid.gd" id="1_rig"]
+[ext_resource type="PackedScene" path="res://actors/eye_pair.tscn" id="2_eyes"]
+
+[node name="CharacterRoot" type="CharacterBody2D"]
+script = ExtResource("1_rig")
+
+[node name="Shadow" type="Polygon2D" parent="."]
+color = Color(0, 0, 0, 0.22)
+z_index = -30
+
+[node name="Skeleton2D" type="Skeleton2D" parent="."]
+
+[node name="b_hips" type="Bone2D" parent="Skeleton2D"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="a_interact" type="Marker2D" parent="Skeleton2D/b_hips"]
+
+[node name="b_torso" type="Bone2D" parent="Skeleton2D/b_hips"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="a_back" type="Marker2D" parent="Skeleton2D/b_hips/b_torso"]
+
+[node name="a_chest" type="Marker2D" parent="Skeleton2D/b_hips/b_torso"]
+
+[node name="b_head" type="Bone2D" parent="Skeleton2D/b_hips/b_torso"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_brow_l" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_head"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="b_brow_r" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_head"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="b_jaw" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_head"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="a_head_top" type="Marker2D" parent="Skeleton2D/b_hips/b_torso/b_head"]
+
+[node name="a_face" type="Marker2D" parent="Skeleton2D/b_hips/b_torso/b_head"]
+
+[node name="b_arm_l_upper" type="Bone2D" parent="Skeleton2D/b_hips/b_torso"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_arm_l_fore" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_arm_l_upper"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_hand_l" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_arm_l_upper/b_arm_l_fore"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="a_hand_l" type="Marker2D" parent="Skeleton2D/b_hips/b_torso/b_arm_l_upper/b_arm_l_fore/b_hand_l"]
+
+[node name="b_arm_r_upper" type="Bone2D" parent="Skeleton2D/b_hips/b_torso"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_arm_r_fore" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_arm_r_upper"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_hand_r" type="Bone2D" parent="Skeleton2D/b_hips/b_torso/b_arm_r_upper/b_arm_r_fore"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="a_hand_r" type="Marker2D" parent="Skeleton2D/b_hips/b_torso/b_arm_r_upper/b_arm_r_fore/b_hand_r"]
+
+[node name="b_leg_l_upper" type="Bone2D" parent="Skeleton2D/b_hips"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_leg_l_lower" type="Bone2D" parent="Skeleton2D/b_hips/b_leg_l_upper"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_foot_l" type="Bone2D" parent="Skeleton2D/b_hips/b_leg_l_upper/b_leg_l_lower"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="b_leg_r_upper" type="Bone2D" parent="Skeleton2D/b_hips"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_leg_r_lower" type="Bone2D" parent="Skeleton2D/b_hips/b_leg_r_upper"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+
+[node name="b_foot_r" type="Bone2D" parent="Skeleton2D/b_hips/b_leg_r_upper/b_leg_r_lower"]
+rest = Transform2D(1, 0, 0, 1, 0, 0)
+auto_calculate_length_and_angle = false
+
+[node name="Parts" type="Node2D" parent="."]
+
+; §6.2 names the far/near arm groups `arm_far_hose` / `arm_near_hose`, which are
+; ROLES, not node names — §12 contract 8 and §9.3 both call the nodes
+; `arm_hose_l/r`. Front-facing default, authored here: the RIGHT arm is near
+; (+40) and the left is far (−20), because §6.3 gives `a_hand_r` the flashlight,
+; the grappling hook and the one-handed Journal carry, and a held item at z 50
+; has to read against the body that holds it. Side-facing swaps the two groups'
+; z_index — that is a facing system, and row 1.2 is where it lands. Nothing here
+; swaps anything today.
+
+[node name="arm_hose_l" type="Polygon2D" parent="Parts"]
+z_index = -20
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="hand_l" type="Polygon2D" parent="Parts"]
+z_index = -20
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="leg_hose_l" type="Polygon2D" parent="Parts"]
+z_index = -10
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="leg_hose_r" type="Polygon2D" parent="Parts"]
+z_index = -10
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="foot_l" type="Polygon2D" parent="Parts"]
+z_index = -10
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="foot_r" type="Polygon2D" parent="Parts"]
+z_index = -10
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="torso" type="Polygon2D" parent="Parts"]
+z_index = 0
+color = Color(0.65098, 0.223529, 0.180392, 1)
+
+[node name="head_base" type="Polygon2D" parent="Parts"]
+z_index = 10
+color = Color(0.862745, 0.752941, 0.658824, 1)
+
+[node name="eyes" parent="Parts" instance=ExtResource("2_eyes")]
+z_index = 20
+
+; §6.2's `brows` row is one table entry over two parts — §9.3 supplies
+; `brow_l.png` and `brow_r.png` — so the row is a container and the two brows
+; hang off it, each rigid on its own §6.1 bone. z_as_relative is on by default,
+; so both children draw at the row's 20.
+[node name="brows" type="Node2D" parent="Parts"]
+z_index = 20
+
+[node name="brow_l" type="Polygon2D" parent="Parts/brows"]
+color = Color(0.054902, 0.054902, 0.054902, 1)
+
+[node name="brow_r" type="Polygon2D" parent="Parts/brows"]
+color = Color(0.054902, 0.054902, 0.054902, 1)
+
+[node name="mouth" type="Polygon2D" parent="Parts"]
+z_index = 20
+color = Color(0.054902, 0.054902, 0.054902, 1)
+
+[node name="hat" type="Polygon2D" parent="Parts"]
+z_index = 30
+color = Color(0.419608, 0.290196, 0.184314, 1)
+
+[node name="arm_hose_r" type="Polygon2D" parent="Parts"]
+z_index = 40
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+[node name="hand_r" type="Polygon2D" parent="Parts"]
+z_index = 40
+color = Color(0.788235, 0.682353, 0.564706, 1)
+
+; A mount point, not geometry: Doc 02 reparents what it holds under here, and
+; §6.2 puts whatever that is above every body part. The rig only parks it on
+; `a_hand_r`.
+[node name="held_item" type="Node2D" parent="Parts"]
+z_index = 50
+
+[node name="Anchors" type="Node2D" parent="."]
+
+[node name="a_ground" type="Marker2D" parent="Anchors"]

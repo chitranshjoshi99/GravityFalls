@@ -1,0 +1,39 @@
+; Row 1.1's visual gate and the deferred half of row 0.1's — see rig_preview.gd.
+; Not run by test_all.gd: it needs a window, and the suite is headless.
+;
+; `Canvas` is sized to EXACTLY project.godot's 1920x1080 and coloured something
+; the window's clear colour is not, so in a windowed 16:10 capture the letterbox
+; bars are the two grey strips where the teal stops. `Ground` is the line
+; §3.1's origin convention puts the feet on.
+;
+; Both carry a large NEGATIVE z_index. §6.2 runs the rig's parts from the shadow
+; at −30 up to the held item at 50, and a backdrop at the default 0 silently
+; swallows the shadow, both legs, both feet and the whole far arm — which is
+; exactly what the first capture showed, and it looked like a rig defect.
+
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://tests/rig_preview.gd" id="1_preview"]
+[ext_resource type="PackedScene" path="res://actors/rig_humanoid.tscn" id="2_rig"]
+
+[node name="RigPreview" type="Node2D"]
+script = ExtResource("1_preview")
+
+[node name="Canvas" type="ColorRect" parent="."]
+z_index = -100
+offset_right = 1920.0
+offset_bottom = 1080.0
+color = Color(0.101961, 0.376471, 0.360784, 1)
+
+[node name="Ground" type="ColorRect" parent="."]
+z_index = -99
+offset_top = 949.0
+offset_right = 1920.0
+offset_bottom = 952.0
+color = Color(0.960784, 0.941176, 0.85098, 1)
+
+; 2.6x so a 258-unit-tall Dipper fills most of the 1080 canvas with margin for
+; the cap; §3.1 puts the origin on the ground, so this y IS the ground line.
+[node name="Rig" parent="." instance=ExtResource("2_rig")]
+position = Vector2(960, 950)
+scale = Vector2(2.6, 2.6)

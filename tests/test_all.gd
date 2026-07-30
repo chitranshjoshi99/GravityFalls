@@ -23,6 +23,39 @@ const SaveDataResource := preload("res://core/save_data.gd")
 const GameStateScript := preload("res://autoload/game_state.gd")
 const RuntimeEventRecord := preload("res://core/runtime_event.gd")
 const RuntimeEventsScript := preload("res://autoload/runtime_events.gd")
+## Preloaded like every script above, and for the same reason harness.gd's header
+## gives: a `--script` run resolves the global name `RigHumanoid` out of the
+## editor's class cache, which a fresh clone does not have.
+const RigHumanoidScene := preload("res://actors/rig_humanoid.tscn")
+const EyePairScene := preload("res://actors/eye_pair.tscn")
+
+## Doc 01 §6.2's draw-order table, written down once so a part added later with
+## no `z_index` fails loudly instead of drawing wherever the tree happens to put
+## it. §6.2 is the SOLE sort inside a character (AUDIT B19), which makes this
+## table the whole of row 1.1's Verify column.
+##
+## Two reconciliations, both forced by §6.2 disagreeing with the rest of Doc 01:
+##
+##   * §6.2 rows read `arm_far_hose` / `arm_near_hose` / `hand_far` / `hand_near`,
+##     but §12 contract 8 and §9.3 name the NODES `arm_hose_l/r`, `hand_l/r`.
+##     Far and near are ROLES: the −20 / +40 pair that §6.2's own "side-facing
+##     swaps the two arm groups" moves between them. Front-facing is the default
+##     and the base authors it — right arm near, left arm far, because §6.3 gives
+##     `a_hand_r` the flashlight, the grapple and the one-handed Journal carry.
+##     No swap machinery exists yet; a facing system is row 1.2's.
+##   * `hair_back` (10) and `hair_front` (30) are absent for exactly the reason
+##     §6.1's `b_hair_01→03` chain is absent from the base: Wendy/Mabel only, and
+##     an inherited scene adds nodes freely.
+const PART_Z_INDEX: Dictionary = {
+	"arm_hose_l": -20, "hand_l": -20,
+	"leg_hose_l": -10, "leg_hose_r": -10, "foot_l": -10, "foot_r": -10,
+	"torso": 0,
+	"head_base": 10,
+	"eyes": 20, "brows": 20, "mouth": 20,
+	"hat": 30,
+	"arm_hose_r": 40, "hand_r": 40,
+	"held_item": 50,
+}
 
 ## Doc 01 §10's tree, which is the single authority for every res:// path in
 ## the project. A directory not on this list is a finding: either the file
@@ -142,6 +175,10 @@ func _init() -> void:
 	# `--script` run genuinely lacks: overlap queries, collision, a camera. Rows
 	# 1.4 and 4.1 are where that arrives.
 	await _check_session_director(h)   # tracker 0.12 / Doc 00 §12 checks 12, 35
+	# Also a (scene) check: the rig is laid out by its own `_ready()`, so the
+	# instances below are added to `root`. No physics, no rendering, no camera.
+	_check_rig_humanoid(h)             # tracker 1.1 / Doc 01 §6, §12 contract 3
+	_check_rig_parts(h)                # tracker 1.1 / Doc 01 §§4, 5, 6.2, §12 contract 8
 
 	h.report()
 	quit(h.exit_code())
@@ -1891,6 +1928,612 @@ func _check_session_director(h) -> void:
 	audio.free()
 	t.set_opaque(false)
 	gs.new_game()
+
+
+## Tracker 1.1 / Doc 01 §6 and §12 contract 3. `rig_humanoid.tscn` is an
+## INHERITED-SCENE base (§10): 30+ character scenes derive from it, row 1.2
+## keyframes bone tracks by these exact node paths, and Docs 02 and 04 mount
+## equipment and spawn UI from the §6.3 anchors by name. So every name and every
+## parent below is a contract, not a detail — a rename here is silent breakage in
+## every character at once.
+##
+## The geometry half asserts the rig is PROPORTION-HONEST: nothing is checked
+## against a constant copied into this file, everything against what
+## `CharacterProportions.segment()` returns. That is the check that fails the day
+## someone bakes Dipper's pixel numbers into the rig and quietly breaks §3.1's
+## "rescaling is one field change, not a re-measure".
+func _check_rig_humanoid(h) -> void:
+	h.expect(RigHumanoidScene is PackedScene, "rig_humanoid.tscn loads as a PackedScene")
+	var rig := RigHumanoidScene.instantiate()
+	# §6.1 draws the root as a `Node2D`; this narrows it to `CharacterBody2D`.
+	# An inherited scene cannot change its root's TYPE, §10 and row 1.3 both require
+	# dipper.tscn to INHERIT this scene, and `SessionDirector._make_player()` is
+	# typed `-> PlayerController`, which extends `CharacterBody2D`. Since
+	# `CharacterBody2D` IS-A `Node2D`, §3.1's ground-contact origin is unchanged.
+	h.expect(rig is CharacterBody2D, "the rig instantiates as a CharacterBody2D (§6.1, narrowed for row 1.3)")
+	h.expect_eq(rig.name, &"CharacterRoot", "the root carries §6.1's name")
+
+	# §6.1's tree, path by path — the path IS the parent assertion. Eighteen bones:
+	# the `b_hair_01 → b_hair_02 → b_hair_03` chain §6.1 marks "(Wendy/Mabel only)"
+	# is deliberately absent from the base and added by the scenes that inherit it.
+	var hips := "Skeleton2D/b_hips"
+	var torso_n := hips + "/b_torso"
+	var head_n := torso_n + "/b_head"
+	var arm_l := torso_n + "/b_arm_l_upper"
+	var arm_r := torso_n + "/b_arm_r_upper"
+	var hand_l := arm_l + "/b_arm_l_fore/b_hand_l"
+	var hand_r := arm_r + "/b_arm_r_fore/b_hand_r"
+	var leg_l := hips + "/b_leg_l_upper"
+	var leg_r := hips + "/b_leg_r_upper"
+	var foot_l := leg_l + "/b_leg_l_lower/b_foot_l"
+	var foot_r := leg_r + "/b_leg_r_lower/b_foot_r"
+	var bone_paths: PackedStringArray = [
+		hips, torso_n, head_n,
+		head_n + "/b_brow_l", head_n + "/b_brow_r", head_n + "/b_jaw",
+		arm_l, arm_l + "/b_arm_l_fore", hand_l,
+		arm_r, arm_r + "/b_arm_r_fore", hand_r,
+		leg_l, leg_l + "/b_leg_l_lower", foot_l,
+		leg_r, leg_r + "/b_leg_r_lower", foot_r,
+	]
+	h.expect_eq(bone_paths.size(), 18, "§6.1's base tree is eighteen bones, hair excluded")
+	for path in bone_paths:
+		h.expect(rig.get_node_or_null(path) is Bone2D, "%s is a Bone2D at its §6.1 path" % path)
+
+	h.expect(rig.get_node_or_null(^"Skeleton2D") is Skeleton2D, "Skeleton2D is a Skeleton2D")
+	h.expect(rig.get_node_or_null(^"Parts") is Node2D, "Parts is a Node2D")
+	h.expect(rig.get_node_or_null(^"Anchors") is Node2D, "Anchors is a Node2D")
+	var shadow := rig.get_node_or_null(^"Shadow")
+	h.expect(shadow is Polygon2D, "Shadow is a Polygon2D")
+	h.expect(
+		shadow != null and shadow.get_parent() == rig,
+		"and hangs off the root, unparented from the skeleton (§6.1) — it never rotates with a bone"
+	)
+
+	# AUDIT B19 / §6.2: the z_index table is the SOLE sort inside a character. A
+	# second sort over the same children re-sorts a swinging arm mid-animation,
+	# which is intermittent limb pop-through in `walk` and `run` — invisible in a
+	# still, and the classic cutout artifact. Walked over the WHOLE rig, not just
+	# `Parts`, because an ancestor that y-sorts sorts `Parts`'s children too.
+	h.expect(not (rig.get_node(^"Parts") as Node2D).y_sort_enabled, "Parts.y_sort_enabled is false (§6.2)")
+	var y_sorters: PackedStringArray = []
+	_collect_y_sorted(rig, rig, y_sorters)
+	h.expect(y_sorters.is_empty(), "nothing in the rig y-sorts (AUDIT B19): %s" % ", ".join(y_sorters))
+
+	# §6.3's table, and it is authoritative about the PARENT: an anchor under a
+	# plain container could not follow the bone it mounts to.
+	#
+	# FINDING — §6.1 and §6.3 disagree. §6.1 draws `Anchors (Node2D)` as a sibling
+	# of `Skeleton2D` holding the anchors; §6.3 parents seven of the eight to bones.
+	# Resolved in §6.3's favour, since a bone-following anchor is the whole point of
+	# the node: the seven bone-mounted anchors are children of their bones, and the
+	# `Anchors` container holds `a_ground` — whose §6.3 parent is `CharacterRoot`,
+	# which a container that is itself a child of `CharacterRoot` satisfies.
+	var anchor_parents := {
+		"a_hand_r": hand_r,
+		"a_hand_l": hand_l,
+		"a_head_top": head_n,
+		"a_face": head_n,
+		"a_back": torso_n,
+		"a_chest": torso_n,
+		"a_ground": "Anchors",
+		"a_interact": hips,
+	}
+	h.expect_eq(anchor_parents.size(), 8, "§12 contract 3 promises eight anchors")
+	for anchor_name: String in anchor_parents:
+		var parent_path: String = anchor_parents[anchor_name]
+		var anchor := rig.get_node_or_null(parent_path + "/" + anchor_name)
+		h.expect(anchor is Marker2D, "%s is a Marker2D under %s (§6.3)" % [anchor_name, parent_path])
+	h.expect(
+		rig.get_node(^"Anchors").get_parent() == rig,
+		"the Anchors container is a child of CharacterRoot, so a_ground's §6.3 parent still holds"
+	)
+
+	# --- the derived layout ---------------------------------------------------
+	# `_ready()` is what lays the skeleton out, and it only runs in the tree. This
+	# is the same call the @tool script makes in the editor for row 1.2.
+	root.add_child(rig)
+
+	# The script's own fallback when `proportions` is null, and §3.3's Dipper.
+	var p := CharacterProportionsResource.new()
+	var foot: Vector2 = p.segment(&"foot")
+	var shin: Vector2 = p.segment(&"leg_lower")
+	var thigh: Vector2 = p.segment(&"leg_upper")
+	var torso: Vector2 = p.segment(&"torso")
+	var arm_upper: Vector2 = p.segment(&"arm_upper")
+	var arm_fore: Vector2 = p.segment(&"arm_fore")
+	var hip_y := -(foot.x + shin.x + thigh.x)
+
+	var hips_node: Node2D = rig.get_node(hips)
+	h.expect(
+		absf(hips_node.position.y - hip_y) < 0.01,
+		"the hips rest at the top of §3.2's foot+shin+thigh stack (%f)" % hips_node.position.y
+	)
+	# A Bone2D whose position differs from its rest is already POSED, and row 1.2's
+	# animations key their deltas off `rest`.
+	for path in bone_paths:
+		var bone: Bone2D = rig.get_node(path)
+		h.expect(
+			bone.rest.origin.is_equal_approx(bone.position),
+			"%s's rest matches the position it was laid out at" % path
+		)
+
+	# §3.1: origin at ground contact, feet-centered.
+	for path in [foot_l, foot_r]:
+		var f: Node2D = rig.get_node(path)
+		h.expect(absf(f.global_position.y) < p.height * 0.01, "%s rests on the ground plane (§3.1)" % path)
+	h.expect(
+		is_equal_approx((rig.get_node(foot_l) as Node2D).global_position.x,
+			-(rig.get_node(foot_r) as Node2D).global_position.x),
+		"and the feet straddle the origin, so it is horizontally centered between them"
+	)
+
+	# §3.2 has no neck: the head mounts directly to the torso top.
+	var head: Node2D = rig.get_node(head_n)
+	h.expect(
+		absf(head.global_position.y - (hip_y - torso.x)) < 0.01,
+		"the head mounts directly at the torso top — §3.2 gives the kids no neck"
+	)
+	var head_top: Node2D = rig.get_node(head_n + "/a_head_top")
+	h.expect(
+		absf(head_top.global_position.y + p.height) < p.height * 0.05,
+		"the top of the head lands within §11's 5%% of the declared height (%f vs %f)"
+			% [head_top.global_position.y, -p.height]
+	)
+	# §5.1's eye line, which is also where the face anchor spawns portraits from.
+	var eye_line: float = head.global_position.y - p.head_diameter \
+		+ float(EyeGeometry.geometry(p.head_diameter)["center_y"])
+	h.expect(
+		absf((rig.get_node(head_n + "/a_face") as Node2D).global_position.y - eye_line) < 0.01,
+		"a_face sits on §5.1's eye line"
+	)
+	var brow: Node2D = rig.get_node(head_n + "/b_brow_l")
+	h.expect(brow.global_position.y < eye_line, "the brows sit above the eye line, not on it")
+
+	var shoulder_l: Node2D = rig.get_node(arm_l)
+	var shoulder_r: Node2D = rig.get_node(arm_r)
+	h.expect(
+		absf(absf(shoulder_r.position.x - shoulder_l.position.x) - torso.y) < torso.y * 0.25,
+		"the shoulders are separated by roughly §3.2's torso width"
+	)
+	h.expect(is_equal_approx(shoulder_l.position.y, shoulder_r.position.y), "and sit at the same height")
+	h.expect(
+		shoulder_l.global_position.y >= hip_y - torso.x
+			and shoulder_l.global_position.y <= hip_y - torso.x * 0.75,
+		"in the top quarter of the torso (%f)" % shoulder_l.global_position.y
+	)
+	h.expect(
+		absf((rig.get_node(hand_l) as Node2D).global_position.y
+			- (shoulder_l.global_position.y + arm_upper.x + arm_fore.x)) < 0.01,
+		"and the arm chain hangs §3.2's upper+fore length below them"
+	)
+	h.expect(
+		(rig.get_node(hand_l) as Node2D).global_position.y < 0.0,
+		"a hanging hand stays above the ground"
+	)
+	h.expect(
+		(rig.get_node(^"Shadow") as Polygon2D).polygon.size() > 3,
+		"the shadow ellipse is built from the proportions, not left empty"
+	)
+
+	# --- the §10 one-field rescale --------------------------------------------
+	# The check that fails the day someone hardcodes Dipper's numbers: the ONLY
+	# difference between these two rigs is `height`.
+	var tall := CharacterProportionsResource.new()
+	tall.height = 300.0
+	var big := RigHumanoidScene.instantiate()
+	big.proportions = tall
+	root.add_child(big)
+
+	var big_hips: Node2D = big.get_node(hips)
+	var tall_hip_y := -(tall.segment(&"foot").x + tall.segment(&"leg_lower").x
+		+ tall.segment(&"leg_upper").x)
+	h.expect(
+		absf(big_hips.position.y - tall_hip_y) < 0.01,
+		"a rescaled rig's hips follow ITS OWN segment() stack (%f)" % big_hips.position.y
+	)
+	h.expect(
+		absf(big_hips.position.y / hips_node.position.y - tall.height / p.height) < 0.001,
+		"the hip height scales with `height` alone — §3.1's one field, not a re-measure"
+	)
+	var big_top: Node2D = big.get_node(head_n + "/a_head_top")
+	h.expect(
+		absf(big_top.global_position.y + tall.height) < tall.height * 0.05,
+		"and the taller rig is as tall as ITS height says (%f vs %f)"
+			% [big_top.global_position.y, -tall.height]
+	)
+	h.expect(
+		absf((big.get_node(foot_l) as Node2D).global_position.y) < tall.height * 0.01,
+		"while its feet stay on the ground plane"
+	)
+
+	# `free()`, not `queue_free()`: a `--script` run quits without servicing the
+	# deletion queue, so a queued node is a leak the suite reports on exit.
+	big.free()
+	rig.free()
+
+
+## Tracker 1.1 / Doc 01 §§4, 5 and 6.2 — the PARTS half of the rig, which is the
+## half that decides whether a limb bends or hinges. `_check_rig_humanoid` above
+## already asserted that nothing in the rig y-sorts; that walk covers `Parts` and
+## everything under it, so it is deliberately not repeated here.
+func _check_rig_parts(h) -> void:
+	var rig := RigHumanoidScene.instantiate()
+	root.add_child(rig)   # `_ready()` is what derives the geometry.
+	var parts := rig.get_node(^"Parts") as Node2D
+	var skeleton := rig.get_node(^"Skeleton2D") as Skeleton2D
+
+	# --- §6.2's table, read in BOTH directions --------------------------------
+	# Every row is a node at exactly its z_index, and every node is a row. The
+	# second direction is the one that catches the part someone adds later and
+	# leaves at the default 0, drawing inside the torso.
+	for part_name: String in PART_Z_INDEX:
+		var part := parts.get_node_or_null(part_name) as CanvasItem
+		if h.expect(part != null, "§6.2's `%s` exists under Parts" % part_name):
+			h.expect_eq(part.z_index, int(PART_Z_INDEX[part_name]), "%s z_index (§6.2)" % part_name)
+	for child in parts.get_children():
+		h.expect(
+			PART_Z_INDEX.has(String(child.name)),
+			"Parts/%s is a row of §6.2's draw-order table" % child.name
+		)
+
+	# --- §4.2's hoses, the thing that makes or breaks the style ----------------
+	# §12 contract 8: ONE polygon per limb spanning BOTH bones, never split at the
+	# elbow or knee. Two polygons hinged at a shared point are the hard mechanical
+	# elbow the whole design exists to avoid — and with flat placeholder fills the
+	# failure is INVISIBLE until the first hose PNG lands at row 6.3.
+	var p := CharacterProportionsResource.new()
+	var arm_length: float = p.segment(&"arm_upper").x + p.segment(&"arm_fore").x
+	var leg_length: float = p.segment(&"leg_upper").x + p.segment(&"leg_lower").x
+	# §4.2's bands. Legs sit 0.04 lower than arms: "knees sit slightly lower
+	# proportionally than elbows".
+	var arm_band := Vector2(0.38, 0.62)
+	var leg_band := Vector2(0.42, 0.66)
+	# name, upper bone (relative to the SKELETON, which is what resolves it),
+	# far bone, hose length, blend band.
+	var hoses: Array = [
+		["arm_hose_l", "b_hips/b_torso/b_arm_l_upper", "b_hips/b_torso/b_arm_l_upper/b_arm_l_fore", arm_length, arm_band],
+		["arm_hose_r", "b_hips/b_torso/b_arm_r_upper", "b_hips/b_torso/b_arm_r_upper/b_arm_r_fore", arm_length, arm_band],
+		["leg_hose_l", "b_hips/b_leg_l_upper", "b_hips/b_leg_l_upper/b_leg_l_lower", leg_length, leg_band],
+		["leg_hose_r", "b_hips/b_leg_r_upper", "b_hips/b_leg_r_upper/b_leg_r_lower", leg_length, leg_band],
+	]
+	for row: Array in hoses:
+		var hose_name := String(row[0])
+		var upper := String(row[1])
+		var far := String(row[2])
+		var length := float(row[3])
+		var band: Vector2 = row[4]
+
+		var hose := parts.get_node_or_null(hose_name) as Polygon2D
+		if not h.expect(hose != null, "%s is a Polygon2D under Parts" % hose_name):
+			continue
+		h.expect_eq(hose.polygon.size(), 28, "%s is §4.1's 28-vertex capsule" % hose_name)
+		h.expect(
+			hose.get_node_or_null(hose.skeleton) == skeleton,
+			"%s's skeleton resolves to the rig's Skeleton2D" % hose_name
+		)
+		# Exactly two: one bone is a rigid limb, three is a rig Doc 01 does not
+		# describe, and a hose split into two polygons never gets here at all.
+		if not h.expect_eq(hose.get_bone_count(), 2, "%s spans exactly two bones (§4.2)" % hose_name):
+			continue
+		h.expect_eq(String(hose.get_bone_path(0)), upper, "%s's first bone is its upper segment" % hose_name)
+		h.expect_eq(String(hose.get_bone_path(1)), far, "%s's second bone is its far segment" % hose_name)
+
+		var upper_weights := hose.get_bone_weights(0)
+		var far_weights := hose.get_bone_weights(1)
+		h.expect_eq(upper_weights.size(), hose.polygon.size(), "%s weights its upper bone once per vertex" % hose_name)
+		h.expect_eq(far_weights.size(), hose.polygon.size(), "%s weights its far bone once per vertex" % hose_name)
+		if upper_weights.size() != hose.polygon.size() or far_weights.size() != hose.polygon.size():
+			continue
+
+		# Partition of unity, vertex by vertex. A vertex whose weights sum to
+		# anything but 1.0 shrinks or explodes as the joint bends, and it does so
+		# silently — the polygon is still closed and still filled.
+		var partitioned := true
+		var on_profile := true
+		var blended := 0
+		for i in hose.polygon.size():
+			if not is_equal_approx(upper_weights[i] + far_weights[i], 1.0):
+				partitioned = false
+			# `t` from the vertex's own Y over the hose length, which is how §4.2
+			# says the weights are derived in the first place.
+			var expected := TubeGeometry.hose_weights(hose.polygon[i].y / length, band.x, band.y)
+			if not (is_equal_approx(upper_weights[i], expected.x) and is_equal_approx(far_weights[i], expected.y)):
+				on_profile = false
+			if upper_weights[i] > 0.0 and upper_weights[i] < 1.0:
+				blended += 1
+		h.expect(partitioned, "%s's two bones partition to 1.0 at every vertex (§4.2)" % hose_name)
+		h.expect(on_profile, "%s follows §4.2's weight profile for its own blend band" % hose_name)
+		# §11's guard, applied to the REAL limb rather than to a synthetic capsule:
+		# with no vertices strictly inside the band every vertex belongs wholly to
+		# one bone and "limbs will hinge, not bend".
+		h.expect(
+			blended >= 4,
+			"%s has at least four vertices strictly inside its blend band, got %d" % [hose_name, blended]
+		)
+
+	# The two bands are really different ON THE RIG, not two constants that happen
+	# to be typed in a file: at the same normalised `t` the profiles must disagree.
+	var arm_mid := _fore_weight_at(parts.get_node_or_null(^"arm_hose_l") as Polygon2D, arm_length, 0.5)
+	var leg_mid := _fore_weight_at(parts.get_node_or_null(^"leg_hose_l") as Polygon2D, leg_length, 0.5)
+	h.expect(arm_mid >= 0.0 and leg_mid >= 0.0, "both hoses carry a vertex at mid-limb to compare")
+	h.expect(
+		is_equal_approx(arm_mid, TubeGeometry.hose_weights(0.5, 0.38, 0.62).y),
+		"the arm blends on §4.2's 0.38–0.62 band at mid-limb (%f)" % arm_mid
+	)
+	h.expect(
+		is_equal_approx(leg_mid, TubeGeometry.hose_weights(0.5, 0.42, 0.66).y),
+		"the leg blends on §4.2's shifted 0.42–0.66 band at mid-limb (%f)" % leg_mid
+	)
+	h.expect(
+		absf(arm_mid - leg_mid) > 0.1,
+		"and the knee really does sit lower than the elbow — same t, different weight (%f vs %f)"
+			% [arm_mid, leg_mid]
+	)
+
+	# --- §4.4: hands and feet are RIGID ---------------------------------------
+	# Weight 1.0 to the terminal bone, no blending. A mitten that blended would
+	# deform when the wrist turned, which is the one place the show never bends.
+	var rigid_parts := {
+		"hand_l": "b_hips/b_torso/b_arm_l_upper/b_arm_l_fore/b_hand_l",
+		"hand_r": "b_hips/b_torso/b_arm_r_upper/b_arm_r_fore/b_hand_r",
+		"foot_l": "b_hips/b_leg_l_upper/b_leg_l_lower/b_foot_l",
+		"foot_r": "b_hips/b_leg_r_upper/b_leg_r_lower/b_foot_r",
+	}
+	for part_name: String in rigid_parts:
+		var poly := parts.get_node_or_null(part_name) as Polygon2D
+		if not h.expect(poly != null, "%s is a Polygon2D under Parts" % part_name):
+			continue
+		if not h.expect_eq(poly.get_bone_count(), 1, "%s is rigid — one bone, no blending (§4.4)" % part_name):
+			continue
+		h.expect_eq(
+			String(poly.get_bone_path(0)), String(rigid_parts[part_name]),
+			"%s hangs off its own terminal bone" % part_name
+		)
+		var weights := poly.get_bone_weights(0)
+		h.expect_eq(weights.size(), poly.polygon.size(), "%s weights once per vertex" % part_name)
+		var all_one := weights.size() > 0
+		for w in weights:
+			if not is_equal_approx(w, 1.0):
+				all_one = false
+		h.expect(all_one, "%s is weighted 1.0 at every vertex (§4.4)" % part_name)
+
+	# --- Deferred D11 / §12 contract 7 ----------------------------------------
+	# Zero PNGs exist and none may be added: `Polygon2D.texture` stays null and
+	# every part is a flat colour fill. Real art lands at R1 by assigning textures
+	# to these same nodes, which is also why the nodes are authored in the scene
+	# and not conjured here.
+	var polygons: Array[Polygon2D] = []
+	_collect_polygons(parts, polygons)
+	var textured: PackedStringArray = []
+	var empty: PackedStringArray = []
+	for poly in polygons:
+		if poly.texture != null:
+			textured.append(String(poly.name))
+		if poly.polygon.size() < 3:
+			empty.append(String(poly.name))
+	h.expect(
+		textured.is_empty(),
+		"no part carries a texture — placeholders render everything (D11 / §12 contract 7): %s"
+			% ", ".join(textured)
+	)
+	h.expect(
+		empty.is_empty(),
+		"every part's geometry is derived from the proportions, not left empty: %s" % ", ".join(empty)
+	)
+
+	# --- §5: the eye pair ------------------------------------------------------
+	var eyes := parts.get_node_or_null(^"eyes") as Node2D
+	if h.expect(eyes != null, "the `eyes` part is present (§6.2)"):
+		h.expect_eq(
+			eyes.scene_file_path, "res://actors/eye_pair.tscn",
+			"and is an instance of §10's eye_pair.tscn, not a bespoke node"
+		)
+		h.expect_eq(eyes.get(&"head_diameter"), p.head_diameter, "the rig drives its head diameter")
+		# §5.1's vertical centre is 0.46·D below the head top — the same line
+		# `a_face` already sits on, so the two must not be allowed to disagree.
+		var face := rig.get_node(^"Skeleton2D/b_hips/b_torso/b_head/a_face") as Node2D
+		h.expect(
+			eyes.global_position.is_equal_approx(face.global_position),
+			"and parks it on §5.1's eye line, where a_face is (%s vs %s)"
+				% [eyes.global_position, face.global_position]
+		)
+
+	# --- §3.1's ground plane and §5.1's eye line, read off the POLYGONS --------
+	_check_rig_silhouette(h, rig, p.head_diameter, "the base rig")
+
+	# --- the §10 one-field rescale, applied to the parts ----------------------
+	# The same contract `_check_rig_humanoid` asserted for bones: an inheriting
+	# character overrides ONE resource, and the geometry follows. This is the
+	# check that fails the day someone bakes Dipper's numbers into a polygon.
+	var tall := CharacterProportionsResource.new()
+	tall.height = 300.0
+	tall.head_ratio = 0.27   # §3.3's Wendy — a different HEAD, not just a taller body.
+	var big := RigHumanoidScene.instantiate()
+	big.proportions = tall
+	root.add_child(big)
+
+	var big_eyes := big.get_node(^"Parts/eyes") as Node2D
+	h.expect_eq(
+		big_eyes.get(&"head_diameter"), tall.head_diameter,
+		"a rescaled rig's eyes follow ITS OWN head diameter (§10's one field)"
+	)
+	var base_radius: float = float(EyeGeometry.geometry(p.head_diameter)["radius"])
+	var tall_radius: float = float(EyeGeometry.geometry(tall.head_diameter)["radius"])
+	h.expect(
+		not is_equal_approx(base_radius, tall_radius),
+		"and that really is a different §5.1 eye radius, so the check is not comparing a constant to itself"
+	)
+	var big_face := big.get_node(^"Skeleton2D/b_hips/b_torso/b_head/a_face") as Node2D
+	h.expect(
+		big_eyes.global_position.is_equal_approx(big_face.global_position),
+		"while still landing on its own eye line"
+	)
+
+	# The hoses rescale with it. `hose_texture_size` minus its two margins is
+	# exactly the capsule's Y extent, so this reads the shape rather than trusting
+	# an index into `Tube`'s vertex order.
+	var big_arm := big.get_node(^"Parts/arm_hose_l") as Polygon2D
+	var base_arm := parts.get_node(^"arm_hose_l") as Polygon2D
+	var tall_arm_length: float = tall.segment(&"arm_upper").x + tall.segment(&"arm_fore").x
+	var tall_extent: float = TubeGeometry.hose_texture_size(
+		tall_arm_length, tall.segment(&"arm_upper").y, tall.segment(&"arm_fore").y).y - 2.0
+	h.expect(
+		absf(_polygon_height(big_arm.polygon) - tall_extent) < 0.01,
+		"a rescaled rig's arm hose spans ITS OWN §3.2 arm length (%f vs %f)"
+			% [_polygon_height(big_arm.polygon), tall_extent]
+	)
+	h.expect(
+		not is_equal_approx(_polygon_height(big_arm.polygon), _polygon_height(base_arm.polygon)),
+		"which is not the base rig's arm length — the geometry is derived, never baked"
+	)
+	# Both silhouette contracts survive the rescale, or they were pixel numbers
+	# that happened to work at Dipper's size.
+	_check_rig_silhouette(h, big, tall.head_diameter, "the rescaled rig")
+
+	# `free()`, not `queue_free()`: a `--script` run quits without servicing the
+	# deletion queue, so a queued node is a leak the suite reports on exit.
+	big.free()
+	rig.free()
+
+
+## Tracker 1.1 repair / Doc 01 §3.1 and §5.1 — the two contracts that live in the
+## POLYGONS rather than in the bones, and that every numeric check in this file
+## missed because it read a bone position instead of the shape riding it.
+##
+##   * §3.1 puts the character origin at ground contact. A foot BONE resting on
+##     y = 0 says nothing about the foot: `Tube.capsule` adds a round cap of half
+##     the end width past each end, and that cap put `leg_w · 0.85` of foot below
+##     the floor while `Shadow` — correctly centred on y = 0 — sat at the ankles.
+##   * §5.1 puts the eye line 0.46·D below the head top and §5.2 puts the brows
+##     above it. `hat` draws at z_index 30 over `brows` at 20 (§6.2), so a cap
+##     that reaches past the brows does not overlap them, it DELETES them.
+##
+## Run against the base rig and against §10's one-field rescale, since a fix that
+## only holds at Dipper's D is a pixel number wearing a formula's clothes.
+##
+## Godot 2D is Y-down and the origin IS the ground, so "below the ground" is a
+## POSITIVE Y and "above the eye line" is a smaller one.
+func _check_rig_silhouette(h, rig: Node2D, head_diameter: float, label: String) -> void:
+	var parts := rig.get_node(^"Parts") as Node2D
+	var to_rig := rig.global_transform.affine_inverse()
+	var polygons: Array[Polygon2D] = []
+	_collect_polygons(parts, polygons)
+	# Not a formality: an empty walk would pass every assertion below vacuously.
+	# Fourteen — §6.2's rows minus `eyes` (a `_draw()` node) and `held_item` (a
+	# bare mount point), plus the two brows the `brows` row expands into.
+	h.expect_eq(polygons.size(), 14, "%s: the ground walk sees every §6.2 polygon part" % label)
+
+	# A pixel of slack — these are derived floats, not authored ones — against a
+	# height of 250+ px, so a real breach is two orders of magnitude larger.
+	const GROUND_EPS := 1.0
+	var sunk := PackedStringArray()
+	var soles := {}
+	var hat_bottom := -INF
+	var brow_top := INF
+	for poly in polygons:
+		# The part's OWN transform, not just its `polygon`: `_rigid` and `_hose`
+		# put the derived offset in `position`, which is exactly where the foot
+		# bug lived.
+		var span := _polygon_y_span(to_rig * poly.global_transform, poly.polygon)
+		if span.y > GROUND_EPS:
+			sunk.append("%s (+%.2f)" % [poly.name, span.y])
+		var part_name := String(poly.name)
+		if part_name.begins_with("foot_"):
+			soles[part_name] = span.y
+		elif part_name == "hat":
+			hat_bottom = span.y
+		elif part_name.begins_with("brow_"):
+			brow_top = minf(brow_top, span.x)
+	# Nothing is exempt. `Shadow` is a ground decal centred on y = 0 and is
+	# deliberately out of range here — it hangs off `CharacterRoot`, not `Parts`.
+	h.expect(
+		sunk.is_empty(),
+		"%s: no part of the rig crosses §3.1's ground plane: %s" % [label, ", ".join(sunk)]
+	)
+
+	# The other half of §3.1, and the reason the check above is not enough on its
+	# own: a rig hovering a foot off the floor passes "nothing below y = 0" and is
+	# just as wrong — the shadow would sit under nobody.
+	h.expect_eq(soles.size(), 2, "%s: both feet are present to stand on" % label)
+	for foot_name: String in soles:
+		h.expect(
+			absf(soles[foot_name]) <= GROUND_EPS,
+			"%s: %s's sole rests ON the ground plane, neither sunk nor floating (%.2f)"
+				% [label, foot_name, soles[foot_name]]
+		)
+
+	# §5.1's eye line, measured down from the crown `a_head_top` marks, exactly as
+	# `rebuild()` derives it — never a copied constant.
+	var crown: float = (to_rig * (rig.get_node(
+		^"Skeleton2D/b_hips/b_torso/b_head/a_head_top") as Node2D).global_position).y
+	var eye_line: float = crown + float(EyeGeometry.geometry(head_diameter)["center_y"])
+	h.expect(hat_bottom > -INF, "%s: the `hat` part carries geometry to measure" % label)
+	h.expect(brow_top < INF, "%s: the brows carry geometry to measure" % label)
+	h.expect(
+		brow_top < eye_line,
+		"%s: the brow polygons sit above §5.1's eye line (%.2f vs %.2f)" % [label, brow_top, eye_line]
+	)
+	h.expect(
+		hat_bottom < eye_line,
+		"%s: the hat's lowest point clears §5.1's eye line, so it cannot cover a pupil (%.2f vs %.2f)"
+			% [label, hat_bottom, eye_line]
+	)
+	# Asserted against the brows THEMSELVES rather than a margin typed in here, so
+	# the check follows them if §5.2's brow geometry ever moves.
+	h.expect(
+		hat_bottom < brow_top,
+		"%s: and clears the brows it draws over at z_index 30 (%.2f vs %.2f)"
+			% [label, hat_bottom, brow_top]
+	)
+
+
+## The topmost and bottommost Y of a polygon once its own transform is applied.
+## Godot 2D is Y-down, so `.x` is the top edge and `.y` is the bottom one.
+func _polygon_y_span(xform: Transform2D, points: PackedVector2Array) -> Vector2:
+	var span := Vector2(INF, -INF)
+	for point in points:
+		var y := (xform * point).y
+		span = Vector2(minf(span.x, y), maxf(span.y, y))
+	return span
+
+
+## The far-bone weight of the vertex sitting at `t` along a hose, or −1.0 when
+## the hose has no vertex there — which is itself a finding, since §4.1's shaft
+## samples are what put vertices inside the blend band at all.
+func _fore_weight_at(hose: Polygon2D, length: float, t: float) -> float:
+	if hose == null or hose.get_bone_count() < 2:
+		return -1.0
+	var weights := hose.get_bone_weights(1)
+	for i in hose.polygon.size():
+		if absf(hose.polygon[i].y / length - t) < 0.001:
+			return weights[i]
+	return -1.0
+
+
+func _collect_polygons(n: Node, out: Array[Polygon2D]) -> void:
+	if n is Polygon2D:
+		out.append(n)
+	for child in n.get_children():
+		_collect_polygons(child, out)
+
+
+func _polygon_height(points: PackedVector2Array) -> float:
+	var low := INF
+	var high := -INF
+	for point in points:
+		low = minf(low, point.y)
+		high = maxf(high, point.y)
+	return high - low
+
+
+## Every node in a rig that y-sorts. §6.2 allows exactly none: `z_index` is the
+## sole sort inside a character, and the second sort is invisible until a limb
+## pops through mid-`walk`.
+func _collect_y_sorted(from: Node, n: Node, out: PackedStringArray) -> void:
+	if n is CanvasItem and (n as CanvasItem).y_sort_enabled:
+		out.append(str(from.get_path_to(n)))
+	for child in n.get_children():
+		_collect_y_sorted(from, child, out)
 
 
 ## The nearest `CanvasLayer` above a node, walked rather than queried: Godot 4.7

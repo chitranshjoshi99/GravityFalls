@@ -1,0 +1,12 @@
+; Doc 01 §10 places this file; §5.2 specifies its contents as a `_draw()` node.
+; There is deliberately nothing in this scene but the root: every circle is
+; drawn from `Eyes.geometry(head_diameter)` at draw time, so an eye pair is
+; correct at any head size without a single authored number. §9.3: "Eyes are
+; procedural. Do not supply eye PNGs."
+
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://actors/eye_pair.gd" id="1_eyes"]
+
+[node name="EyePair" type="Node2D"]
+script = ExtResource("1_eyes")

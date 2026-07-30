@@ -293,6 +293,7 @@ All character geometry derives from two numbers: **total height `H`** (pixels at
 | `leg_lower` | `0.18 · H` | `leg_w · 0.90` |
 | `foot` | `0.05 · H` | `leg_w · 1.7` |
 | `neck` | **none** | Head mounts directly to torso top — the show has no visible neck on kids |
+| `cap` | `0.21 · D` tall, brim `0.62 · D` forward | Dipper's, and every head-worn part. Its **lowest** edge stays above §5.1's eye line at `0.46 · D`, because §6.2 draws `hat` at z 30 over `brows` at 20: a cap that reaches the eye line silently deletes both brows and the tops of both pupils, and reads as a bowl cut with an unauthored scowl. A round capsule is the wrong primitive — it is round at *both* ends, so it bulges above the crown and hangs past the eyes |
 
 These are **bone lengths, not art pieces.** The skeleton keeps two bones per limb (§6.1), but the geometry and texture spanning them is single and continuous (§4.2–4.3). A limb's hose length is `arm_upper + arm_fore` (or `leg_upper + leg_lower`); its width runs from `arm_w` at the shoulder to `arm_w · 0.92` at the wrist, tapering across the one polygon via `Tube.capsule(..., width_end)`.
 
@@ -300,7 +301,7 @@ These are **bone lengths, not art pieces.** The skeleton keeps two bones per lim
 
 | Character | `H` | `k` | `D` | `arm_w` | `leg_w` | `torso_scale` | Notes |
 |---|---|---|---|---|---|---|---|
-| **Dipper** | 258 | 0.32 | 82 | 13 | 16 | 1.00 | Cap is a separate part with its own bone — must survive `surprise` head-snap without clipping |
+| **Dipper** | 258 | 0.32 | 82 | 13 | 16 | 1.00 | Cap is a separate part — must survive `surprise` head-snap without clipping. It rides `b_head`, which is what actually meets that requirement: §6.1's tree has **no hat bone**, and a lagging child bone would clip on exactly the snap this note is about. A cap bone is an inherited scene's to add |
 | **Mabel** | 250 | 0.33 | 82 | 13 | 16 | 1.15 | Sweater bulks the torso and *swallows the upper arm*: `sleeve_occlusion = 0.40` shortens the hose so it emerges at the cuff. Her `arm_hose` PNG is correspondingly shorter than Dipper's; the cuff itself belongs to the torso polygon |
 | **Wendy** | 300 | 0.27 | 81 | 13 | 15 | 0.95 | Tallest silhouette in the core cast; hair is a 3-part chain with its own trailing bones |
 | **Soos** | 300 | 0.30 | 90 | 17 | 20 | 1.45 | Widest torso; arms read shorter because the torso mass is larger, not because the bones changed |
@@ -424,6 +425,8 @@ Weight profile along the limb, parameter `t = 0` at shoulder, `t = 1` at wrist:
 
 The 24%-of-length blend band is the hose. Narrower reads as a joint; wider reads as a noodle with no structure. Legs use the same profile with the band shifted to `0.42 – 0.66` — knees sit slightly lower proportionally than elbows.
 
+> **The leg band sits exactly on §11's floor, and the two numbers are coupled.** §4.1's shaft samples are `[0.16, 0.40, 0.50, 0.60, 0.84]`. The arm band 0.38–0.62 catches three per side — six blended vertices. The **leg** band 0.42–0.66 catches only two per side, i.e. **exactly the four** §11 demands, with no margin. Move either the samples or the leg band and legs drop under the guard, hinging instead of bending — and with flat placeholder fills that failure is invisible until the first hose PNG lands at Doc 6 §13's gate. Change one and re-read the other.
+
 ```gdscript
 static func hose_weights(t: float, blend_start := 0.38, blend_end := 0.62) -> Vector2:
 	var f := smoothstep(blend_start, blend_end, t)
@@ -471,6 +474,8 @@ The `margin` is the 1 px transparent border §8.1 requires; the UV offset accoun
 
 Hands and feet are **rigid** — weight 1.0 to the terminal bone, no blending. They are mittens: a rounded quad with a thumb bump, never articulated fingers. Feet are a single rounded wedge; the show never shows a distinct ankle.
 
+**A foot's lowest vertex rests on `y = 0`, not its mount point.** §3.1's origin is ground contact and Doc 2 §1.3 keys Y-sorting, the shadow and the collision capsule off it, so a foot polygon that dips below the origin puts the shadow at the ankles and sorts the character as if it stood further back than it does. `Tube.capsule` extends a round cap of half the end width *past* each end, which is the term a placement has to subtract: mounting a capsule foot at the sole bone alone sinks it `foot_width / 2` — 13.6 px on Dipper, 5.3% of his height. Nothing in `Parts` may cross the ground plane; the `Shadow`, which is a ground decal and not a part, is the one thing that straddles it.
+
 ---
 
 ## 5. Eye rendering math
@@ -515,6 +520,8 @@ static func pupil_offset(look_dir: Vector2, max_offset: float) -> Vector2:
 	return look_dir.limit_length(1.0) * max_offset
 ```
 
+> **Open discrepancy — the shipped code differs.** `res://core/eyes.gd` implements this as `look_dir.limit_length(max_offset)`, which landed at tracker row 0.5 with a passing check. The two agree only when `|look_dir| ≥ 1`: the line above treats `look_dir` as a **normalised direction that gets scaled**, so a half-length gaze lands the pupil at `0.5 · max_offset`; the code treats it as a **pixel offset that gets clamped**, so the same input lands it half a pixel off centre. `EyePair.look_dir` is therefore documented in *pixels* today. Both are safe — neither can escape the sclera — but one of the two has to move, and the doc's reading is the more useful API.
+
 ### 5.2 The merged outline trick
 
 Do **not** compute a boolean union of the two circles. Instead, draw in four passes:
@@ -546,29 +553,41 @@ Expression is driven by **brow bones only** (rotation + Y offset) plus pupil sca
 ### 6.1 `Skeleton2D` tree
 
 ```
-CharacterRoot (Node2D)          ← origin at ground contact, feet-centered
+CharacterRoot (CharacterBody2D) ← origin at ground contact, feet-centered
 ├── Shadow (Polygon2D)          ← ellipse, unparented from skeleton
 ├── Skeleton2D
-│   └── b_hips
-│       ├── b_torso
-│       │   ├── b_head
+│   └── b_hips + a_interact
+│       ├── b_torso + a_back, a_chest
+│       │   ├── b_head + a_head_top, a_face
 │       │   │   ├── b_brow_l
 │       │   │   ├── b_brow_r
 │       │   │   ├── b_jaw          ← mouth part mount
 │       │   │   └── b_hair_01 → b_hair_02 → b_hair_03   (Wendy/Mabel only)
-│       │   ├── b_arm_l_upper → b_arm_l_fore → b_hand_l
-│       │   └── b_arm_r_upper → b_arm_r_fore → b_hand_r
+│       │   ├── b_arm_l_upper → b_arm_l_fore → b_hand_l + a_hand_l
+│       │   └── b_arm_r_upper → b_arm_r_fore → b_hand_r + a_hand_r
 │       ├── b_leg_l_upper → b_leg_l_lower → b_foot_l
 │       └── b_leg_r_upper → b_leg_r_lower → b_foot_r
 ├── Parts (Node2D)              ← all Polygon2D geometry, y_sort_enabled = FALSE
-└── Anchors (Node2D)
+└── Anchors (Node2D)            ← a_ground, the one anchor §6.3 puts on the root
 ```
+
+**The root is a `CharacterBody2D`, and that is load-bearing** — §10 makes this an *inherited-scene* base, an inherited scene cannot change its root node's **type**, and `dipper.tscn` must instantiate as a `PlayerController`, which extends `CharacterBody2D` (Doc 00 §3.2 types `_make_player()` on it). A `Node2D` root makes the player scene unbuildable as specified. `CharacterBody2D` IS-A `Node2D`, so §3.1's ground-contact origin is untouched; only the type narrows. The root script is `rig_humanoid.gd`, `class_name RigHumanoid`, and a character scene that replaces that script must extend it.
+
+**Anchors hang off bones, not off the container.** §6.3's table is the authority on each anchor's parent, and seven of the eight name a bone: an anchor parented to a plain `Node2D` cannot follow the bone it mounts to. The `Anchors` container exists for `a_ground`, whose §6.3 parent is `CharacterRoot` — which a container that is itself a child of `CharacterRoot` satisfies.
+
+**`b_foot_l` / `b_foot_r` rest at the sole, not the ankle.** §3.2's `foot` *length* is the ankle rise inside the height stack; the bone is the pivot a planted foot rotates about, so it sits on the ground plane and §3.1's origin convention is directly checkable off it.
+
+The hair chain is absent from the base scene — an inherited scene adds it, rather than every character in the game carrying three bones no animation touches.
 
 ### 6.2 Draw order within `Parts`
 
 Fixed `z_index` per part, and **this table is the sole authority inside a character**. `Parts` must have `y_sort_enabled = false`: Y-sorting it as well would be a second, competing sort over the same children, and a swinging arm whose polygon origin crossed the torso's Y would re-sort mid-animation — intermittent limb pop-through during `walk` and `run`, the classic cutout artifact. Y-sorting operates at the *character* level only, keyed off `CharacterRoot`'s ground origin (Doc 2 §1.3, Doc 3 §2.1).
 
 Front-facing is the default; side-facing swaps the two arm groups.
+
+**`arm_far_hose`, `arm_near_hose`, `hand_far` and `hand_near` are roles, not node names.** The nodes are `arm_hose_l/r` and `hand_l/r` — the names §12 contract 8 and §9.3 use — and "swapping the arm groups" means swapping the two groups' `z_index` between −20 and +40. The base rig authors the front-facing default with the right arm near, because §6.3 gives `a_hand_r` the flashlight, the grappling hook and the one-handed Journal carry, and a held item at z 50 has to read against the body holding it.
+
+Likewise **`brows` is one row over two parts** — §9.3 supplies `brow_l.png` and `brow_r.png` and §5.3 drives each brow independently — so the row is a container at z 20 with the two brow polygons under it, each rigid on its own bone.
 
 | `z_index` | Part |
 |---|---|
@@ -725,7 +744,7 @@ Dimensions below are Dipper's. For any other character, compute with `Tube.hose_
 | `head_base.png` | 164 × 164 |
 | `hair_back.png` | 180 × 140 |
 | `hair_front.png` | 180 × 120 |
-| `hat.png` | 190 × 110 (Dipper cap, Stan fez, Soos cap — omit for Mabel/Wendy) |
+| `hat.png` | 190 × 110 (Dipper cap, Stan fez, Soos cap — omit for Mabel/Wendy). **110 at 2× is 55 px at 1×, and a 55 px cap mounted at the crown of an 82 px head reaches past §5.1's eye line at 37.7 px** — with §6.2's hat-over-brows z-order that hides both brows and the pupil tops. Anchor the art above the crown, or revise this height. The rig's silhouette check catches it the day the file lands |
 | `brow_l.png`, `brow_r.png` | 44 × 16 each |
 | `mouth_sheet.png` | 8 cells × 96 × 64 — closed, open-small, open-wide, smile, frown, grimace, "o", teeth |
 | `torso.png` | 102 × 134 (×`torso_scale`) |

@@ -1,0 +1,126 @@
+{
+  "requirement": "Tracker row 1.1 — build res://actors/rig_humanoid.tscn, the inherited-scene base every character in the project derives from: Skeleton2D and the Doc 01 §6.1 bone tree, the §6.2 Polygon2D parts with their fixed z_index table, the §6.3 anchors, and `Parts` with y_sort_enabled = false. Placeholder flat fills only; no PNGs exist.",
+  "repo": "/Users/chitranshjoshi/Work/GravityFalls",
+  "trackerRow": "1.1",
+  "checkpointEvery": 3,
+  "priorState": "P0 is complete (rows 0.1-0.12). The suite is green at 485 checks via `godot --headless --script res://tests/test_all.gd`. Tube, Eyes, CharacterProportions and Palette already exist in res://core with their §11 geometry checks passing. SessionDirector already instantiates a player from res://actors/player/dipper.tscn behind a ResourceLoader.exists() guard, typed `PlayerController` (a CharacterBody2D), with a bare PlayerController as the fallback until row 1.3 lands the scene.",
+  "toolchain": {
+    "godot": "4.7.1.stable",
+    "testCommand": "godot --headless --script res://tests/test_all.gd",
+    "gate": "Exit 0 is NOT the gate — Godot exits 0 when the suite fails to parse. Green means the run printed `test_all: N checks passed` with N above the previous row's count, and the six expected ERROR lines are still exactly six."
+  },
+  "architecture": {
+    "decision": "The rig's root node is a CharacterBody2D named `CharacterRoot`, and its script `res://actors/rig_humanoid.gd` declares `class_name RigHumanoid extends CharacterBody2D` and derives all geometry from an exported CharacterProportions resource at _ready() under @tool.",
+    "note": "This is a genuine fork and it is settled here because two later rows are blocked on it. Doc 01 §6.1 writes the root as `Node2D`, but Doc 01 §10 requires dipper.tscn to be an INHERITED scene of rig_humanoid.tscn, and an inherited scene cannot change its root's TYPE — while SessionDirector._make_player() is typed `-> PlayerController`, which extends CharacterBody2D. A Node2D root makes row 1.3 unbuildable as specified. CharacterBody2D IS-A Node2D, so §6.1's ground-contact origin convention is unchanged; only the type is narrowed. Deriving geometry from the resource (rather than baking Dipper's numbers into the .tscn) is what Doc 01 §10 means by 'overriding only the CharacterProportions resource and part textures'.",
+    "alternatives": [
+      "Node2D root, dipper.tscn instances the rig as a child instead of inheriting it — rejected: Doc 01 §10 and tracker row 1.3 both say 'inherits', and SessionDirector would then need the rig's anchors through an extra hop.",
+      "CharacterBody2D root with no script, geometry built by a static helper in res://core/ — rejected as a file that exists only to dodge the script slot; a base class is the same laziness with one fewer indirection.",
+      "Bake Dipper's numbers into the .tscn as authored polygon data — rejected: 30+ characters share this base, and re-authoring polygons per character is exactly what §3.1's 'rescaling is one field change' forbids."
+    ],
+    "seams": [
+      "`class_name RigHumanoid extends CharacterBody2D` — row 1.4's PlayerController must change its `extends CharacterBody2D` to `extends RigHumanoid` so dipper.tscn, whose root script replaces the base's, keeps the rig build. Recorded in the tracker note for rows 1.3/1.4.",
+      "Node names are the contract: `Skeleton2D`, `Parts`, `Anchors`, `Shadow`, the eighteen §6.1 bone names, the eight §6.3 anchor names, and the §6.2 part names. Row 1.2's AnimationPlayer keyframes bone tracks by these paths; Doc 01 §12 contract 3 promises the anchors to Docs 02 and 04.",
+      "`Parts` is a plain Node2D with y_sort_enabled = false and the §6.2 z_index table is the sole sort inside a character (AUDIT B19). Zone-level YSort keys off CharacterRoot's ground origin.",
+      "A limb is ONE Polygon2D spanning both bones (Doc 01 §12 contract 8), weighted by Tube.hose_weights — never split at the elbow or knee.",
+      "Geometry is derived from `proportions`, never hardcoded: an inherited scene overrides the resource and nothing else."
+    ],
+    "adr": null
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Build the rig scene skeleton, anchors and the derived bone layout",
+      "intent": "Create res://actors/rig_humanoid.tscn and res://actors/rig_humanoid.gd carrying Doc 01 §6.1's node tree — CharacterRoot, Shadow, Skeleton2D with the eighteen bones, an empty Parts, and Anchors — plus Doc 01 §6.3's eight Marker2D anchors on the bones the table names. The script derives every bone rest position from the exported CharacterProportions so a character is rescaled by one field.",
+      "files": ["actors/rig_humanoid.tscn", "actors/rig_humanoid.gd", "tests/test_all.gd"],
+      "constraints": "Root is CharacterBody2D named CharacterRoot with `class_name RigHumanoid`, @tool, origin at ground contact. Bone rests come from CharacterProportions.segment(); no literal pixel numbers for anything the resource can derive. Do not touch player_controller.gd, session_director.gd or any autoload. No AnimationPlayer — that is row 1.2.",
+      "acceptance": "The scene instantiates; every §6.1 node and §6.3 anchor exists at its specified parent; the derived skeleton stacks feet-at-origin to head-top ≈ -height; the suite is green with the new checks and a higher printed count.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": [],
+      "status": "done",
+      "result": "rig_humanoid.tscn + .gd land §6.1's tree (18 bones, Shadow off the skeleton, empty Parts, Anchors) with every rest position derived from CharacterProportions and the eight §6.3 anchors on the bones §6.3 names. Suite green at 560 checks (was 485).",
+      "deviations": [
+        "§6.1's root type is narrowed from Node2D to CharacterBody2D, per this plan's architecture decision.",
+        "§6.1 and §6.3 disagree on anchor parentage; resolved in §6.3's favour — seven anchors on bones, `Anchors` holds only `a_ground`. §6.1's diagram needs amending.",
+        "§6 names bones but gives NO rest positions. Shoulder height and separation, brow height, jaw height, leg lateral offset and the hand/foot mounts were all derived here and should be stated in §6.",
+        "The foot bone is mounted at the sole, not the ankle: §3.2's `foot` length is the ankle rise inside the height stack, and the sole is the pivot a planted foot rotates about. Worth a sentence in §6.1.",
+        "§6.1's `(Wendy/Mabel only)` hair chain is ambiguous about the base. It is absent here; an inherited scene adds it.",
+        "Engine gotcha, not a doc error: Bone2D's constructor leaves `rest` an all-zero Transform2D and Skeleton2D inverts every rest on enter_tree, before `_ready()` can derive one — 18 `affine_invert: det == 0` errors per character unless the scene authors an identity rest. The property is spelled `auto_calculate_length_and_angle` while its accessors are `get_autocalculate_…`, and a text scene drops a misspelled property silently."
+      ]
+    },
+    {
+      "id": "T2",
+      "title": "Add the §6.2 Polygon2D parts, bone weights and the eye pair",
+      "intent": "Fill `Parts` with the Doc 01 §6.2 parts at their fixed z_index, generating hose limbs from Tube.capsule with two-bone weights from Tube.hose_weights, rigid hands and feet, and flat placeholder fills. Add res://actors/eye_pair.tscn/.gd as the §5.2 four-pass _draw() eyes so the signature feature has an owner.",
+      "files": ["actors/rig_humanoid.tscn", "actors/rig_humanoid.gd", "actors/eye_pair.tscn", "actors/eye_pair.gd", "tests/test_all.gd"],
+      "constraints": "One polygon per limb spanning both bones (Doc 01 §12 contract 8). Parts.y_sort_enabled = false and no node in the rig sets it true. z_index exactly per the §6.2 table. Polygon2D.skeleton points at Skeleton2D and weights partition to 1.0 per vertex. Flat colours only — Polygon2D.texture stays null (Deferred D11).",
+      "acceptance": "Every §6.2 part exists at its table z_index; hose polygons carry 28 vertices and two bones whose weights sum to 1.0 at every vertex; the eyes render through Eyes.geometry() at the rig's head diameter; the suite is green with a higher count.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": "The rig must read as a humanoid silhouette, validated in T3.",
+      "depends_on": ["T1"],
+      "status": "done",
+      "result": "Fifteen §6.2 part nodes authored in the scene at their table z_index with §9.2 placeholder fills; hoses, rigid parts and bone weights derived in rebuild(); eye_pair.tscn/.gd added as §5.2's four-pass _draw(). Suite green at 684 checks (was 560).",
+      "deviations": [
+        "§5.1 and core/eyes.gd disagree on pupil_offset: the doc writes `look_dir.limit_length(1.0) * max_offset` (a normalized direction, scaled), the shipped code writes `look_dir.limit_length(max_offset)` (a pixel offset, clamped). They agree only when |look_dir| >= 1.0. The code shipped at row 0.5 with a passing check and is used as-is; EyePair.look_dir is therefore documented as pixels. One of the two must move.",
+        "§6.2's `arm_far_hose` / `arm_near_hose` / `hand_far` / `hand_near` are roles, not node names — §12 contract 8 and §9.3 name the nodes `arm_hose_l/r` and `hand_l/r`. Front-facing default authored as right-arm-near (+40) / left-arm-far (-20). No facing-swap machinery built; row 1.2 owns it.",
+        "§6.2 puts `eyes` in `Parts`, but a _draw() node takes no bone weights, so unlike every Polygon2D it does not follow `b_head`. Positioned at rest only; the fix is a RemoteTransform2D on `b_head` with update_scale = false (§5.3 squashes scale.y and must win), and row 1.2 is the first row with a moving head.",
+        "§3.3 says Dipper's cap has 'its own bone'; §6.1's tree has no hat bone. `hat` rides `b_head`, which is what actually satisfies §3.3's stated requirement of surviving the `surprise` head-snap without clipping. A cap bone stays an inherited scene's to add.",
+        "LOAD-BEARING: §4.2's leg band 0.42-0.66 combined with §4.1's fixed shaft samples [0.16, 0.40, 0.50, 0.60, 0.84] puts exactly FOUR vertices inside a leg's blend band — §11's guard is >= 4, so legs pass with zero margin while arms carry six. Any future edit to either the samples or the leg band silently drops legs below the guard, and the failure is invisible until the first hose PNG lands at row 6.3. §4.1's own comment reasons only about the arm band.",
+        "§6.2's `brows` row is one table entry over two parts (§9.3 supplies brow_l.png and brow_r.png, §5.3 drives each brow independently). Built as a `brows` Node2D carrying the row's z_index = 20 with the two brow polygons under it.",
+        "Engine behaviour, not a doc error: Polygon2D.add_bone paths resolve relative to the node named by Polygon2D.skeleton, not relative to the polygon.",
+        "The class-cache trap of row 0.9 reproduced: a typed `EyePair` handle inside rig_humanoid.gd was a PARSE error on the first run, because a global class added in the same change as its first user is not in a fresh clone's class cache. Reached through `set()` with the reason commented at the site."
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "Make the letterbox and silhouette observation on a real window",
+      "intent": "Row 0.1 deferred its visual half to this row: the letterbox check needs something on screen. Run the rig in a windowed Godot at a 16:10 resolution, capture the frame, and confirm both that the 1920x1080 canvas letterboxes rather than stretches and that the placeholder rig reads as a humanoid.",
+      "files": ["tests/rig_preview.tscn", "tests/rig_preview.gd"],
+      "constraints": "The preview is a test fixture under res://tests/, not game content — Doc 01 §10 places nothing else there. It must not alter the rig or the suite's behaviour. If a windowed run is impossible in this environment, say so plainly and assert the stretch transform programmatically instead of skipping the gate.",
+      "acceptance": "A captured frame shows the rig as a humanoid silhouette with the canvas letterboxed (bars top and bottom at 16:10), or a stated, honest fallback with the stretch transform asserted numerically.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": "Screenshot of the windowed run: equal bars top and bottom, rig centred, no console errors.",
+      "depends_on": ["T2"],
+      "status": "done",
+      "result": "tests/rig_preview.tscn/.gd render the rig on a 1920x1080 teal canvas with a ground line. A windowed 1440x900 run captured through `screencapture -l <CGWindowID>` shows 45 px black bars top and bottom around a 1440x810 canvas — measured pixel by pixel, not eyeballed — and the printed stretch transform is scale (0.75, 0.75), offset (0, 45). Row 0.1's carried observation is now evidence-backed. The rig reads as a humanoid with §6.2's draw order visibly correct. Suite still green at 684.",
+      "deviations": [
+        "Capture route worth recording: the Claude app owns a macOS fullscreen Space, so `screencapture -x`, `-R` and `-T` all photograph THAT Space and never see the Godot window. Only `screencapture -l <CGWindowID>` reaches a window on another Space, and no stock CLI yields a CGWindowID (system python3 has no Quartz) — a small Swift helper did it, scratchpad-only.",
+        "VISUAL DEFECT 1 — the `hat` capsule swallows the brows and the top of both pupils. Tube.capsule(D*0.16, D*0.92, 8, D*0.72) at the crown reaches ~42.9 units below it while §5.1's eye line is at 0.46*D = 37.98 and the brows at 20.6, and hat z 30 beats brows z 20. It reads as a bowl cut and an unauthored scowl. A round capsule cap is the wrong shape for a cap.",
+        "VISUAL DEFECT 2 — the feet cross the ground plane. Each foot capsule sits at -foot.x with width leg_width*1.7 = 27.2, so its distal round cap extends 13.6 units below y = 0, 5.3% of the height. The Shadow is correctly centred on y = 0, which makes it sit at the ankles rather than under the soles, and §3.1's ground-contact origin is visibly mid-foot.",
+        "VISUAL DEFECT 3 — the legs are exactly tangent. Hips place them at ±leg_width/2 = ±8 with width 16, so the stance has no daylight in it and the feet (27.2 wide at ±8) overlap into one blob. Numerically consistent with §3.2; this one is proportions, not geometry."
+      ]
+    },
+    {
+      "id": "T5",
+      "title": "Repair the hat and foot placeholder geometry the screenshot found",
+      "intent": "T3's capture found two defects no numeric check could see: the hat capsule covered the brows and pupil tops, and the foot capsules crossed the ground plane by 13.6 units against §3.1's ground-contact origin. Both are geometry in rebuild(). Added mid-run, at the user's checkpoint decision.",
+      "files": ["actors/rig_humanoid.gd", "tests/test_all.gd"],
+      "constraints": "Do not move the foot bone — it is mounted at the sole on purpose and T1's checks assert it. Leg tangency is out of scope: it follows from §3.2's own leg_width and is a proportions question. Every new shape derives from `proportions`.",
+      "acceptance": "No part sits below the ground plane, at least one foot vertex touches it, the hat clears the brows' own topmost extent, and all of it survives the one-field rescale.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": "Re-capture the preview: soles on the ground line with the shadow under them, brows and pupils clear of the cap.",
+      "depends_on": ["T3"],
+      "status": "done",
+      "result": "The cap is now a twelve-point flat dome-plus-brim whose lowest point is 0.16*D, clearing the brows' top edge at 0.22*D; the foot offset became `foot.x + foot.y * 0.5`, which is the capsule's distal cap radius the old placement ignored. Ten new silhouette checks run against both the base and the rescaled rig. Suite green at 704 checks; re-captured screenshot confirms both.",
+      "deviations": [
+        "§4.4 is under-specified on mounting: it calls a foot 'a single rounded wedge' and says hands and feet are rigid, but gives no rule relating either polygon to §3.1's ground-contact origin — which is exactly how a distal cap sank 5.3% of the height below the floor with every numeric check green.",
+        "§3.2 gives every segment a length and a width row; the cap has neither, so its geometry is invented by whoever builds it. That is the under-specification behind the hat defect.",
+        "§9.3's `hat.png` is 190x110 at 2x, i.e. 95x55 at 1x. Mounted at the crown on D = 82 that reaches past §5.1's 0.46*D eye line, and §6.2 puts the hat over the brows — the same defect, arriving with the art at R1. Either the texture anchors above the crown or §9.3's height needs revising. The new hat check will catch it.",
+        "`Shadow` legitimately spans ±0.3*foot.y across y = 0. It is a ground decal and it is not under `Parts`, so the no-part-below-ground walk does not see it. Reported rather than exempted."
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "Record row 1.1 in the tracker and correct Doc 01 where reality differed",
+      "intent": "Close the row the way every P0 row was closed: flip 1.1 to Done with its notes, add the Log line naming this plan file, carry the findings into the rows they will bite (1.2, 1.3, 1.4), and correct Doc 01 §6.1/§6.3 where the build proved the text wrong.",
+      "files": ["docs/TRACKER.md", "docs/01-theme-animation-asset-tokens.md", "executions/p1-rig-humanoid.json"],
+      "constraints": "Locked decisions stay locked — a doc correction records what the build proved, it does not swap a decision. Do not commit; the user commits.",
+      "acceptance": "Row 1.1 reads Done with notes a cold session can act on; the Log carries a dated line; every deviation in this plan file appears either in the tracker or in Doc 01.",
+      "verify": "godot --headless --script res://tests/test_all.gd",
+      "visual": null,
+      "depends_on": ["T3", "T5"],
+      "status": "done",
+      "result": "Tracker row 1.1 is Done with its notes; row 0.1's carried letterbox observation is struck through and recorded as made; rows 1.2, 1.3 and 1.4 carry what 1.1 left them (the eye pair's RemoteTransform2D, the far/near role naming, the one-field override, and `extends RigHumanoid`). Doc 01 corrected in seven places: §6.1's root type, anchor parentage and sole-mounted foot bones; §6.2's role-vs-node names and the two-part brows row; §4.2's zero-margin leg band; §4.4's ground-plane rule; §5.1's pupil_offset divergence; §3.2's missing cap row and §3.3's hat bone; §9.3's hat.png height. Log line dated 2026-07-30."
+    }
+  ]
+}
